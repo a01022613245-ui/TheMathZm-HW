@@ -9,6 +9,7 @@
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     .ox-btn { transition: all 0.15s; }
     .ox-btn:hover { transform: scale(1.05); }
@@ -17,14 +18,12 @@
 <body class="bg-gray-50 min-h-screen">
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 // ── Supabase ──
 const SUPABASE_URL = 'https://dfoifyzdorpbpykohndo.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmb2lmeXpkb3JwYnB5a29obmRvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM5MTQyNzMsImV4cCI6MjA5OTQ5MDI3M30.xC02IOyZh95OhfccpA8_dtXdm4Ti1wPys1FKBkNG7Wc';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-const ADMIN_CODE = 'fjskmath1234';
 
 // ── 유틸리티 ──
 function genPassword() {
@@ -71,6 +70,13 @@ const DB = {
     if (classId) q = q.eq('class_id', classId);
     const { data } = await q; return data || [];
   },
+  async getAllStudents(teacherId) {
+    const classes = await DB.getClasses(teacherId);
+    if (classes.length === 0) return [];
+    const classIds = classes.map(c => c.id);
+    const { data } = await sb.from('omr_students').select('*').in('class_id', classIds).order('created_at');
+    return data || [];
+  },
   async getHomeworks(classId) {
     let q = sb.from('omr_homeworks').select('*').order('created_at', { ascending: false });
     if (classId) q = q.eq('class_id', classId);
@@ -101,10 +107,6 @@ function LoginView({ onLogin }) {
   const handleLogin = async () => {
     setError('');
     if (!loginId || !password) { setError('ID와 비밀번호를 입력하세요.'); return; }
-    if (loginId === 'admin' && password === ADMIN_CODE) {
-      onLogin({ role: 'admin' });
-      return;
-    }
     setLoading(true);
     // Try teacher
     const { data: teacher } = await sb.from('omr_teachers').select('*').eq('login_id', loginId).eq('password', password).maybeSingle();
@@ -173,63 +175,128 @@ function PasswordModal({ role, user, onClose, onChanged }) {
   );
 }
 
-// ── 관리자 뷰 ──
-function AdminView({ onLogout }) {
-  const [teachers, setTeachers] = useState([]);
-  const [name, setName] = useState('');
-  const [msg, setMsg] = useState('');
+// ── 학생 상세 모달 (Chart.js) ──
+function StudentDetailModal({ student, classes, onClose }) {
+  const [submissions, setSubmissions] = useState([]);
+  const [homeworks, setHomeworks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
 
-  const load = async () => { setTeachers(await DB.getTeachers()); };
-  useEffect(() => { load(); }, []);
-
-  const addTeacher = async () => {
-    if (!name.trim()) return;
-    const loginId = await makeLoginId('TMZ', name.trim(), 'omr_teachers');
-    const pw = genPassword();
-    await sb.from('omr_teachers').insert({ name: name.trim(), login_id: loginId, password: pw });
-    setName('');
-    setMsg(`강사 추가 완료: ID=${loginId}, 비밀번호=${pw}`);
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      const subs = await DB.getStudentSubmissions(student.id);
+      // Get all homeworks for this student's class
+      const hws = await DB.getHomeworks(student.class_id);
+      setSubmissions(subs);
+      setHomeworks(hws);
+      setLoading(false);
+    };
     load();
-  };
+  }, [student.id]);
 
-  const deleteTeacher = async (t) => {
-    if (!confirm(`${t.name} 강사를 삭제하시겠습니까? 관련 반/학생/과제가 모두 삭제됩니다.`)) return;
-    await sb.from('omr_teachers').delete().eq('id', t.id);
-    load();
-  };
+  // Build chart data
+  useEffect(() => {
+    if (loading || !chartRef.current) return;
 
-  const resetPassword = async (t) => {
-    const pw = genPassword();
-    await sb.from('omr_teachers').update({ password: pw }).eq('id', t.id);
-    setMsg(`${t.name} 비밀번호 초기화: ${pw}`);
-    load();
-  };
+    // Destroy previous chart
+    if (chartInstance.current) chartInstance.current.destroy();
+
+    const submittedHws = homeworks.filter(hw => submissions.some(s => s.homework_id === hw.id));
+    const labels = submittedHws.map(hw => hw.title);
+    const rates = submittedHws.map(hw => {
+      const sub = submissions.find(s => s.homework_id === hw.id);
+      if (!sub) return 0;
+      const total = sub.correct_count + sub.wrong_count;
+      return total > 0 ? Math.round((sub.correct_count / total) * 100) : 0;
+    });
+
+    chartInstance.current = new Chart(chartRef.current, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: '정답률 (%)',
+          data: rates,
+          backgroundColor: rates.map(r => r >= 80 ? 'rgba(59,130,246,0.6)' : r >= 50 ? 'rgba(234,179,8,0.6)' : 'rgba(239,68,68,0.6)'),
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { y: { beginAtZero: true, max: 100, ticks: { callback: v => v + '%' } } },
+        plugins: { legend: { display: false } },
+      },
+    });
+
+    return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+  }, [loading, submissions, homeworks]);
+
+  const totalCorrect = submissions.reduce((sum, s) => sum + (s.correct_count || 0), 0);
+  const totalWrong = submissions.reduce((sum, s) => sum + (s.wrong_count || 0), 0);
+  const totalAll = totalCorrect + totalWrong;
+  const overallRate = totalAll > 0 ? Math.round((totalCorrect / totalAll) * 100) : 0;
+  const className = classes?.find(c => c.id === student.class_id)?.name || '';
 
   return (
-    <div className="max-w-2xl mx-auto p-4">
-      <Header title="관리자" onLogout={onLogout} />
-      <div className="bg-white rounded-xl shadow p-6 mb-4">
-        <h2 className="text-lg font-bold mb-4">강사 관리</h2>
-        {msg && <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4 text-sm text-green-800">{msg}</div>}
-        <div className="flex gap-2 mb-4">
-          <input className="flex-1 border rounded-lg px-3 py-2" placeholder="강사 이름" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addTeacher()} />
-          <button className="bg-blue-600 text-white px-4 rounded-lg" onClick={addTeacher}>추가</button>
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold">{student.name} 학생 상세</h3>
+          <button className="text-gray-400 hover:text-gray-600 text-xl" onClick={onClose}>&times;</button>
         </div>
-        <div className="space-y-2">
-          {teachers.map(t => (
-            <div key={t.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
-              <div>
-                <span className="font-medium">{t.name}</span>
-                <span className="text-gray-500 text-sm ml-2">({t.login_id})</span>
-              </div>
-              <div className="flex gap-2">
-                <button className="text-sm text-blue-600 hover:underline" onClick={() => resetPassword(t)}>비밀번호 초기화</button>
-                <button className="text-sm text-red-600 hover:underline" onClick={() => deleteTeacher(t)}>삭제</button>
-              </div>
+
+        <div className="text-sm text-gray-600 mb-4">
+          {className && <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded mr-2">{className}</span>}
+          {student.school && <span>{student.school} {student.grade}</span>}
+          <span className="ml-2 text-gray-400">({student.login_id})</span>
+        </div>
+
+        {loading ? (
+          <p className="text-center text-gray-400 py-8">로딩 중...</p>
+        ) : (
+          <>
+            {/* 전체 정답률 */}
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-4 mb-4 text-center">
+              <p className="text-sm text-gray-600 mb-1">전체 정답률</p>
+              <p className="text-3xl font-bold text-blue-600">{overallRate}%</p>
+              <p className="text-sm text-gray-500 mt-1">{totalCorrect}O / {totalWrong}X (총 {submissions.length}개 과제 제출)</p>
             </div>
-          ))}
-          {teachers.length === 0 && <p className="text-gray-400 text-center py-4">등록된 강사가 없습니다.</p>}
-        </div>
+
+            {/* 차트 */}
+            {submissions.length > 0 && (
+              <div className="mb-4" style={{ height: '200px' }}>
+                <canvas ref={chartRef}></canvas>
+              </div>
+            )}
+
+            {/* 제출 이력 */}
+            <h4 className="font-bold text-sm mb-2">제출 이력</h4>
+            <div className="space-y-2">
+              {homeworks.map(hw => {
+                const sub = submissions.find(s => s.homework_id === hw.id);
+                const total = sub ? sub.correct_count + sub.wrong_count : 0;
+                const rate = total > 0 ? Math.round((sub.correct_count / total) * 100) : null;
+                return (
+                  <div key={hw.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                    <span className="text-sm font-medium">{hw.title}</span>
+                    {sub ? (
+                      <span className="text-sm">
+                        <span className="text-blue-600 font-medium">{sub.correct_count}O</span> / <span className="text-red-600 font-medium">{sub.wrong_count}X</span>
+                        <span className="ml-2 text-gray-500">({rate}%)</span>
+                      </span>
+                    ) : (
+                      <span className="text-sm text-gray-400">미제출</span>
+                    )}
+                  </div>
+                );
+              })}
+              {homeworks.length === 0 && <p className="text-gray-400 text-center py-4">등록된 과제가 없습니다.</p>}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -237,100 +304,170 @@ function AdminView({ onLogout }) {
 
 // ── 강사 뷰 ──
 function TeacherView({ user, onLogout, onUserUpdate }) {
-  const [tab, setTab] = useState('classes'); // classes | students | homeworks | submissions
+  const [tab, setTab] = useState('classes');
   const [classes, setClasses] = useState([]);
-  const [selectedClass, setSelectedClass] = useState(null);
   const [showPwModal, setShowPwModal] = useState(false);
 
   const loadClasses = async () => {
     const cls = await DB.getClasses(user.id);
     setClasses(cls);
-    if (cls.length > 0 && !selectedClass) setSelectedClass(cls[0]);
-    else if (cls.length > 0 && selectedClass) {
-      const found = cls.find(c => c.id === selectedClass.id);
-      if (found) setSelectedClass(found);
-      else setSelectedClass(cls[0]);
-    } else setSelectedClass(null);
   };
   useEffect(() => { loadClasses(); }, []);
+
+  const tabs = [['classes','클래스 관리'],['students','학생관리'],['homeworks','과제관리'],['submissions','제출현황']];
 
   return (
     <div className="max-w-4xl mx-auto p-4">
       <Header title={`${user.name} 강사`} onLogout={onLogout} onPasswordChange={() => setShowPwModal(true)} />
       {showPwModal && <PasswordModal role="teacher" user={user} onClose={() => setShowPwModal(false)} onChanged={pw => onUserUpdate({ ...user, password: pw })} />}
 
-      {/* 반 선택 */}
-      <div className="bg-white rounded-xl shadow p-4 mb-4">
-        <ClassManager classes={classes} selectedClass={selectedClass} onSelect={setSelectedClass} teacherId={user.id} onReload={loadClasses} />
+      {/* 상단 4개 탭 한 줄 */}
+      <div className="flex gap-1 mb-4 bg-white rounded-xl shadow p-1">
+        {tabs.map(([k,v]) => (
+          <button key={k} className={`flex-1 px-3 py-2.5 rounded-lg font-medium text-sm transition-colors ${tab===k ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`} onClick={() => setTab(k)}>{v}</button>
+        ))}
       </div>
 
-      {selectedClass && (
-        <>
-          <div className="flex gap-2 mb-4">
-            {[['students','학생관리'],['homeworks','과제관리'],['submissions','제출현황']].map(([k,v]) => (
-              <button key={k} className={`px-4 py-2 rounded-lg font-medium ${tab===k ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-100'}`} onClick={() => setTab(k)}>{v}</button>
-            ))}
-          </div>
-          {tab === 'students' && <StudentManager classId={selectedClass.id} />}
-          {tab === 'homeworks' && <HomeworkManager classId={selectedClass.id} />}
-          {tab === 'submissions' && <SubmissionView classId={selectedClass.id} />}
-        </>
-      )}
+      {tab === 'classes' && <ClassManager classes={classes} teacherId={user.id} onReload={loadClasses} />}
+      {tab === 'students' && <StudentManager classes={classes} teacherId={user.id} onReloadClasses={loadClasses} />}
+      {tab === 'homeworks' && <HomeworkManager classes={classes} teacherId={user.id} />}
+      {tab === 'submissions' && <SubmissionView classes={classes} teacherId={user.id} />}
     </div>
   );
 }
 
-// ── 반 관리 ──
-function ClassManager({ classes, selectedClass, onSelect, teacherId, onReload }) {
+// ── 클래스 관리 ──
+function ClassManager({ classes, teacherId, onReload }) {
   const [name, setName] = useState('');
+  const [selectedClass, setSelectedClass] = useState(null);
+  const [classStudents, setClassStudents] = useState([]);
+  const [allStudents, setAllStudents] = useState([]);
+  const [addStudentId, setAddStudentId] = useState('');
+
+  const loadClassStudents = async (classId) => {
+    if (!classId) { setClassStudents([]); return; }
+    setClassStudents(await DB.getStudents(classId));
+  };
+
+  const loadAllStudents = async () => {
+    setAllStudents(await DB.getAllStudents(teacherId));
+  };
+
+  useEffect(() => { loadAllStudents(); }, []);
+  useEffect(() => { if (selectedClass) loadClassStudents(selectedClass.id); }, [selectedClass]);
 
   const addClass = async () => {
     if (!name.trim()) return;
     const { data } = await sb.from('omr_classes').insert({ name: name.trim(), teacher_id: teacherId }).select().single();
     setName('');
     await onReload();
-    if (data) onSelect(data);
+    if (data) setSelectedClass(data);
   };
 
   const deleteClass = async (c) => {
-    if (!confirm(`"${c.name}" 반을 삭제하시겠습니까? 소속 학생과 과제가 모두 삭제됩니다.`)) return;
+    if (!confirm(`"${c.name}" 클래스를 삭제하시겠습니까? 소속 학생과 과제가 모두 삭제됩니다.`)) return;
     await sb.from('omr_classes').delete().eq('id', c.id);
+    if (selectedClass?.id === c.id) setSelectedClass(null);
     onReload();
   };
 
+  const assignStudent = async () => {
+    if (!addStudentId || !selectedClass) return;
+    await sb.from('omr_students').update({ class_id: selectedClass.id }).eq('id', addStudentId);
+    setAddStudentId('');
+    loadClassStudents(selectedClass.id);
+    loadAllStudents();
+  };
+
+  const removeFromClass = async (student) => {
+    if (!confirm(`${student.name}을(를) 이 클래스에서 제거하시겠습니까?`)) return;
+    // Move to unassigned - we'll set class_id to the first available class or keep in current
+    // Actually, just remove from this class by deleting the student
+    // Per plan: remove from class = unassign. But students must belong to a class.
+    // Let's just confirm and delete from this class by removing the student entirely?
+    // No - the plan says "추가/제거" from class. Let's delete the student.
+    await sb.from('omr_students').delete().eq('id', student.id);
+    loadClassStudents(selectedClass.id);
+    loadAllStudents();
+  };
+
+  // Students not in the selected class (available to assign)
+  const availableStudents = selectedClass
+    ? allStudents.filter(s => s.class_id !== selectedClass.id)
+    : [];
+
   return (
-    <div>
-      <h2 className="text-lg font-bold mb-3">반 관리</h2>
-      <div className="flex gap-2 mb-3">
-        <input className="flex-1 border rounded-lg px-3 py-2" placeholder="반 이름 (예: 고1 수학A반)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addClass()} />
-        <button className="bg-blue-600 text-white px-4 rounded-lg" onClick={addClass}>추가</button>
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl shadow p-6">
+        <h2 className="text-lg font-bold mb-3">클래스 관리</h2>
+        <div className="flex gap-2 mb-3">
+          <input className="flex-1 border rounded-lg px-3 py-2" placeholder="클래스 이름 (예: 고1 수학A반)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addClass()} />
+          <button className="bg-blue-600 text-white px-4 rounded-lg" onClick={addClass}>추가</button>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {classes.map(c => (
+            <div key={c.id} className={`flex items-center gap-1 px-3 py-2 rounded-lg cursor-pointer border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedClass(c)}>
+              <span className="font-medium">{c.name}</span>
+              <button className="ml-1 text-red-400 hover:text-red-600 text-xs" onClick={e => { e.stopPropagation(); deleteClass(c); }}>✕</button>
+            </div>
+          ))}
+          {classes.length === 0 && <p className="text-gray-400">클래스를 추가해주세요.</p>}
+        </div>
       </div>
-      <div className="flex flex-wrap gap-2">
-        {classes.map(c => (
-          <div key={c.id} className={`flex items-center gap-1 px-3 py-2 rounded-lg cursor-pointer border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => onSelect(c)}>
-            <span className="font-medium">{c.name}</span>
-            <button className="ml-1 text-red-400 hover:text-red-600 text-xs" onClick={e => { e.stopPropagation(); deleteClass(c); }}>✕</button>
+
+      {selectedClass && (
+        <div className="bg-white rounded-xl shadow p-6">
+          <h3 className="font-bold mb-3">{selectedClass.name} - 소속 학생</h3>
+
+          {/* 학생 배정 */}
+          {availableStudents.length > 0 && (
+            <div className="flex gap-2 mb-4">
+              <select className="flex-1 border rounded-lg px-3 py-2" value={addStudentId} onChange={e => setAddStudentId(e.target.value)}>
+                <option value="">학생 선택하여 배정...</option>
+                {availableStudents.map(s => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.login_id})</option>
+                ))}
+              </select>
+              <button className="bg-green-600 text-white px-4 rounded-lg" onClick={assignStudent}>배정</button>
+            </div>
+          )}
+
+          {/* 소속 학생 목록 */}
+          <div className="space-y-2">
+            {classStudents.map(s => (
+              <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                <div>
+                  <span className="font-medium">{s.name}</span>
+                  <span className="text-gray-500 text-sm ml-2">({s.login_id})</span>
+                  {s.school && <span className="text-gray-400 text-sm ml-2">{s.school} {s.grade}</span>}
+                </div>
+                <button className="text-sm text-red-600 hover:underline" onClick={() => removeFromClass(s)}>제거</button>
+              </div>
+            ))}
+            {classStudents.length === 0 && <p className="text-gray-400 text-center py-4">소속 학생이 없습니다.</p>}
           </div>
-        ))}
-        {classes.length === 0 && <p className="text-gray-400">반을 추가해주세요.</p>}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── 학생 관리 ──
-function StudentManager({ classId }) {
+function StudentManager({ classes, teacherId, onReloadClasses }) {
   const [students, setStudents] = useState([]);
   const [name, setName] = useState('');
   const [school, setSchool] = useState('');
   const [grade, setGrade] = useState('');
+  const [classId, setClassId] = useState('');
   const [msg, setMsg] = useState('');
+  const [detailStudent, setDetailStudent] = useState(null);
 
-  const load = async () => { setStudents(await DB.getStudents(classId)); };
-  useEffect(() => { load(); }, [classId]);
+  const load = async () => { setStudents(await DB.getAllStudents(teacherId)); };
+  useEffect(() => { load(); }, []);
 
   const addStudent = async () => {
     if (!name.trim()) return;
+    if (!classId) { alert('클래스를 선택하세요.'); return; }
     const loginId = await makeLoginId('TMZ', name.trim(), 'omr_students');
     const pw = genPassword();
     await sb.from('omr_students').insert({ name: name.trim(), school: school.trim(), grade: grade.trim(), login_id: loginId, password: pw, class_id: classId });
@@ -352,6 +489,8 @@ function StudentManager({ classId }) {
     load();
   };
 
+  const getClassName = (cid) => classes.find(c => c.id === cid)?.name || '';
+
   return (
     <div className="bg-white rounded-xl shadow p-6">
       <h2 className="text-lg font-bold mb-4">학생 관리</h2>
@@ -360,17 +499,22 @@ function StudentManager({ classId }) {
         <input className="border rounded-lg px-3 py-2 w-32" placeholder="이름" value={name} onChange={e => setName(e.target.value)} />
         <input className="border rounded-lg px-3 py-2 w-32" placeholder="학교 (선택)" value={school} onChange={e => setSchool(e.target.value)} />
         <input className="border rounded-lg px-3 py-2 w-20" placeholder="학년" value={grade} onChange={e => setGrade(e.target.value)} />
+        <select className="border rounded-lg px-3 py-2" value={classId} onChange={e => setClassId(e.target.value)}>
+          <option value="">클래스 선택</option>
+          {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
         <button className="bg-blue-600 text-white px-4 rounded-lg" onClick={addStudent}>추가</button>
       </div>
       <div className="space-y-2">
         {students.map(s => (
-          <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+          <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3 cursor-pointer hover:bg-gray-100" onClick={() => setDetailStudent(s)}>
             <div>
               <span className="font-medium">{s.name}</span>
               <span className="text-gray-500 text-sm ml-2">({s.login_id})</span>
               {s.school && <span className="text-gray-400 text-sm ml-2">{s.school} {s.grade}</span>}
+              {getClassName(s.class_id) && <span className="bg-blue-50 text-blue-600 text-xs px-2 py-0.5 rounded ml-2">{getClassName(s.class_id)}</span>}
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2" onClick={e => e.stopPropagation()}>
               <button className="text-sm text-blue-600 hover:underline" onClick={() => resetPassword(s)}>비밀번호 초기화</button>
               <button className="text-sm text-red-600 hover:underline" onClick={() => deleteStudent(s)}>삭제</button>
             </div>
@@ -378,19 +522,27 @@ function StudentManager({ classId }) {
         ))}
         {students.length === 0 && <p className="text-gray-400 text-center py-4">등록된 학생이 없습니다.</p>}
       </div>
+
+      {detailStudent && <StudentDetailModal student={detailStudent} classes={classes} onClose={() => setDetailStudent(null)} />}
     </div>
   );
 }
 
 // ── 과제 관리 ──
-function HomeworkManager({ classId }) {
+function HomeworkManager({ classes, teacherId }) {
+  const [selectedClass, setSelectedClass] = useState(null);
   const [homeworks, setHomeworks] = useState([]);
   const [title, setTitle] = useState('');
   const [rangeInput, setRangeInput] = useState('');
   const [preview, setPreview] = useState([]);
 
-  const load = async () => { setHomeworks(await DB.getHomeworks(classId)); };
-  useEffect(() => { load(); }, [classId]);
+  useEffect(() => { if (classes.length > 0 && !selectedClass) setSelectedClass(classes[0]); }, [classes]);
+
+  const load = async () => {
+    if (!selectedClass) { setHomeworks([]); return; }
+    setHomeworks(await DB.getHomeworks(selectedClass.id));
+  };
+  useEffect(() => { load(); }, [selectedClass]);
 
   const handleRangeChange = (val) => {
     setRangeInput(val);
@@ -398,9 +550,10 @@ function HomeworkManager({ classId }) {
   };
 
   const createHomework = async () => {
+    if (!selectedClass) { alert('클래스를 선택하세요.'); return; }
     if (!title.trim()) { alert('과제명을 입력하세요.'); return; }
     if (preview.length === 0) { alert('문제번호 범위를 입력하세요.'); return; }
-    await sb.from('omr_homeworks').insert({ title: title.trim(), class_id: classId, problems: preview });
+    await sb.from('omr_homeworks').insert({ title: title.trim(), class_id: selectedClass.id, problems: preview });
     setTitle(''); setRangeInput(''); setPreview([]);
     load();
   };
@@ -412,51 +565,71 @@ function HomeworkManager({ classId }) {
   };
 
   return (
-    <div className="bg-white rounded-xl shadow p-6">
-      <h2 className="text-lg font-bold mb-4">과제 관리</h2>
-      <div className="space-y-3 mb-4 border-b pb-4">
-        <input className="w-full border rounded-lg px-3 py-2" placeholder="과제명 (예: 수능특강 1단원)" value={title} onChange={e => setTitle(e.target.value)} />
-        <input className="w-full border rounded-lg px-3 py-2" placeholder="문제번호 범위 (예: 43~64, 87, 90~95)" value={rangeInput} onChange={e => handleRangeChange(e.target.value)} />
-        {preview.length > 0 && (
-          <div className="bg-blue-50 rounded-lg p-3">
-            <p className="text-sm text-blue-700 mb-1">미리보기 ({preview.length}문제)</p>
-            <p className="text-sm text-blue-900">{preview.join(', ')}</p>
-          </div>
-        )}
-        <button className="bg-blue-600 text-white px-6 py-2 rounded-lg" onClick={createHomework}>과제 등록</button>
+    <div className="space-y-4">
+      {/* 클래스 선택 */}
+      <div className="bg-white rounded-xl shadow p-4">
+        <h2 className="text-lg font-bold mb-3">과제 관리</h2>
+        <div className="flex flex-wrap gap-2">
+          {classes.map(c => (
+            <button key={c.id} className={`px-3 py-2 rounded-lg border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedClass(c)}>{c.name}</button>
+          ))}
+          {classes.length === 0 && <p className="text-gray-400">클래스를 먼저 생성해주세요.</p>}
+        </div>
       </div>
-      <div className="space-y-2">
-        {homeworks.map(h => (
-          <div key={h.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
-            <div>
-              <span className="font-medium">{h.title}</span>
-              <span className="text-gray-500 text-sm ml-2">({h.problems.length}문제)</span>
-              <p className="text-xs text-gray-400 mt-1">{h.problems.join(', ')}</p>
-            </div>
-            <button className="text-sm text-red-600 hover:underline" onClick={() => deleteHomework(h)}>삭제</button>
+
+      {selectedClass && (
+        <div className="bg-white rounded-xl shadow p-6">
+          <h3 className="font-bold mb-4">{selectedClass.name} - 과제</h3>
+          <div className="space-y-3 mb-4 border-b pb-4">
+            <input className="w-full border rounded-lg px-3 py-2" placeholder="과제명 (예: 수능특강 1단원)" value={title} onChange={e => setTitle(e.target.value)} />
+            <input className="w-full border rounded-lg px-3 py-2" placeholder="문제번호 범위 (예: 43~64, 87, 90~95)" value={rangeInput} onChange={e => handleRangeChange(e.target.value)} />
+            {preview.length > 0 && (
+              <div className="bg-blue-50 rounded-lg p-3">
+                <p className="text-sm text-blue-700 mb-1">미리보기 ({preview.length}문제)</p>
+                <p className="text-sm text-blue-900">{preview.join(', ')}</p>
+              </div>
+            )}
+            <button className="bg-blue-600 text-white px-6 py-2 rounded-lg" onClick={createHomework}>과제 등록</button>
           </div>
-        ))}
-        {homeworks.length === 0 && <p className="text-gray-400 text-center py-4">등록된 과제가 없습니다.</p>}
-      </div>
+          <div className="space-y-2">
+            {homeworks.map(h => (
+              <div key={h.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                <div>
+                  <span className="font-medium">{h.title}</span>
+                  <span className="text-gray-500 text-sm ml-2">({h.problems.length}문제)</span>
+                  <p className="text-xs text-gray-400 mt-1">{h.problems.join(', ')}</p>
+                </div>
+                <button className="text-sm text-red-600 hover:underline" onClick={() => deleteHomework(h)}>삭제</button>
+              </div>
+            ))}
+            {homeworks.length === 0 && <p className="text-gray-400 text-center py-4">등록된 과제가 없습니다.</p>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ── 제출 현황 (강사) ──
-function SubmissionView({ classId }) {
+function SubmissionView({ classes, teacherId }) {
+  const [selectedClass, setSelectedClass] = useState(null);
   const [homeworks, setHomeworks] = useState([]);
   const [students, setStudents] = useState([]);
   const [selectedHw, setSelectedHw] = useState(null);
   const [submissions, setSubmissions] = useState([]);
   const [detailStudent, setDetailStudent] = useState(null);
 
+  useEffect(() => { if (classes.length > 0 && !selectedClass) setSelectedClass(classes[0]); }, [classes]);
+
   const load = async () => {
-    const [hw, st] = await Promise.all([DB.getHomeworks(classId), DB.getStudents(classId)]);
+    if (!selectedClass) { setHomeworks([]); setStudents([]); return; }
+    const [hw, st] = await Promise.all([DB.getHomeworks(selectedClass.id), DB.getStudents(selectedClass.id)]);
     setHomeworks(hw);
     setStudents(st);
-    if (hw.length > 0 && !selectedHw) setSelectedHw(hw[0]);
+    if (hw.length > 0) setSelectedHw(hw[0]);
+    else setSelectedHw(null);
   };
-  useEffect(() => { load(); }, [classId]);
+  useEffect(() => { load(); }, [selectedClass]);
 
   const loadSubmissions = async () => {
     if (!selectedHw) return;
@@ -468,7 +641,6 @@ function SubmissionView({ classId }) {
   const submittedStudents = students.filter(s => submittedIds.has(s.id));
   const unsubmittedStudents = students.filter(s => !submittedIds.has(s.id));
 
-  // 오답률 통계
   const errorRates = useMemo(() => {
     if (!selectedHw || submissions.length === 0) return {};
     const rates = {};
@@ -498,14 +670,22 @@ function SubmissionView({ classId }) {
 
   return (
     <div className="space-y-4">
-      {/* 과제 선택 */}
+      {/* 클래스 선택 */}
       <div className="bg-white rounded-xl shadow p-4">
         <h2 className="text-lg font-bold mb-3">제출 현황</h2>
-        <div className="flex flex-wrap gap-2">
-          {homeworks.map(h => (
-            <button key={h.id} className={`px-3 py-2 rounded-lg border-2 ${selectedHw?.id === h.id ? 'border-blue-500 bg-blue-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedHw(h)}>{h.title}</button>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {classes.map(c => (
+            <button key={c.id} className={`px-3 py-2 rounded-lg border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedClass(c)}>{c.name}</button>
           ))}
         </div>
+        {/* 과제 선택 */}
+        {selectedClass && (
+          <div className="flex flex-wrap gap-2">
+            {homeworks.map(h => (
+              <button key={h.id} className={`px-3 py-1.5 rounded-lg text-sm border ${selectedHw?.id === h.id ? 'border-indigo-500 bg-indigo-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedHw(h)}>{h.title}</button>
+            ))}
+          </div>
+        )}
       </div>
 
       {selectedHw && (
@@ -518,7 +698,6 @@ function SubmissionView({ classId }) {
               <button className="text-sm text-blue-600 hover:underline ml-auto" onClick={loadSubmissions}>새로고침</button>
             </div>
 
-            {/* 제출 학생 */}
             <div className="mb-3">
               <p className="text-sm font-medium text-green-700 mb-1">제출 완료 ({submittedStudents.length}명)</p>
               <div className="flex flex-wrap gap-2">
@@ -533,7 +712,6 @@ function SubmissionView({ classId }) {
               </div>
             </div>
 
-            {/* 미제출 학생 */}
             {unsubmittedStudents.length > 0 && (
               <div>
                 <p className="text-sm font-medium text-red-700 mb-1">미제출 ({unsubmittedStudents.length}명)</p>
@@ -588,7 +766,7 @@ function SubmissionView({ classId }) {
         </>
       )}
 
-      {homeworks.length === 0 && (
+      {selectedClass && homeworks.length === 0 && (
         <div className="bg-white rounded-xl shadow p-8 text-center text-gray-400">등록된 과제가 없습니다.</div>
       )}
     </div>
@@ -652,38 +830,44 @@ function StudentView({ user, onLogout, onUserUpdate }) {
   );
 }
 
-// ── O/X 입력 ──
+// ── O/X 입력 (오답만 클릭) ──
 function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
-  const [results, setResults] = useState({});
+  const [marked, setMarked] = useState(new Set()); // Set of problem numbers marked as wrong
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
     if (existingSubmission?.results) {
-      setResults(existingSubmission.results);
+      // Reconstruct marked set from existing results
+      const wrongSet = new Set();
+      for (const [key, val] of Object.entries(existingSubmission.results)) {
+        if (val === 'X') wrongSet.add(parseInt(key));
+      }
+      setMarked(wrongSet);
       setSubmitted(true);
     }
   }, [existingSubmission]);
 
   const toggle = (num) => {
-    setResults(prev => {
-      const cur = prev[String(num)];
-      const next = { ...prev };
-      if (cur === 'O') next[String(num)] = 'X';
-      else if (cur === 'X') delete next[String(num)];
-      else next[String(num)] = 'O';
+    setMarked(prev => {
+      const next = new Set(prev);
+      if (next.has(num)) next.delete(num);
+      else next.add(num);
       return next;
     });
     setSubmitted(false);
   };
 
-  const allMarked = homework.problems.every(p => results[String(p)] !== undefined);
-  const correctCount = homework.problems.filter(p => results[String(p)] === 'O').length;
-  const wrongCount = homework.problems.filter(p => results[String(p)] === 'X').length;
+  const wrongCount = marked.size;
+  const correctCount = homework.problems.length - wrongCount;
 
   const handleSubmit = async () => {
-    if (!allMarked) { alert('모든 문제에 O 또는 X를 표시하세요.'); return; }
     setSubmitting(true);
+    // Build results: unmarked = O, marked = X
+    const results = {};
+    for (const p of homework.problems) {
+      results[String(p)] = marked.has(p) ? 'X' : 'O';
+    }
     const payload = {
       student_id: studentId,
       homework_id: homework.id,
@@ -709,6 +893,10 @@ function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
         <div className="text-sm text-gray-500">{homework.problems.length}문제</div>
       </div>
 
+      <div className="bg-gray-50 rounded-lg p-3 mb-4 text-center text-sm text-gray-600">
+        틀린 문제만 클릭하세요. 클릭하지 않은 문제는 정답(O)으로 처리됩니다.
+      </div>
+
       {submitted && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4 text-center">
           <p className="text-green-800 font-medium">제출 완료! {correctCount}O / {wrongCount}X</p>
@@ -718,12 +906,12 @@ function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
 
       <div className="grid grid-cols-5 sm:grid-cols-6 md:grid-cols-8 gap-2 mb-6">
         {homework.problems.map(p => {
-          const val = results[String(p)];
+          const isWrong = marked.has(p);
           return (
-            <button key={p} className={`ox-btn rounded-lg p-3 text-center border-2 ${val === 'O' ? 'border-blue-500 bg-blue-50' : val === 'X' ? 'border-red-500 bg-red-50' : 'border-gray-200 bg-gray-50 hover:border-gray-300'}`} onClick={() => toggle(p)}>
+            <button key={p} className={`ox-btn rounded-lg p-3 text-center border-2 ${isWrong ? 'border-red-500 bg-red-50' : 'border-gray-200 bg-white hover:border-gray-300'}`} onClick={() => toggle(p)}>
               <div className="text-xs text-gray-500 mb-1">{p}번</div>
-              <div className={`text-xl font-bold ${val === 'O' ? 'text-blue-600' : val === 'X' ? 'text-red-600' : 'text-gray-300'}`}>
-                {val || '-'}
+              <div className={`text-xl font-bold ${isWrong ? 'text-red-600' : 'text-gray-300'}`}>
+                {isWrong ? 'X' : '-'}
               </div>
             </button>
           );
@@ -732,9 +920,9 @@ function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
 
       <div className="flex items-center justify-between">
         <div className="text-sm text-gray-600">
-          <span className="text-blue-600 font-medium">{correctCount}O</span> / <span className="text-red-600 font-medium">{wrongCount}X</span> / <span className="text-gray-400">{homework.problems.length - correctCount - wrongCount}미표시</span>
+          <span className="text-blue-600 font-medium">{correctCount}O</span> / <span className="text-red-600 font-medium">{wrongCount}X</span>
         </div>
-        <button className={`px-6 py-3 rounded-lg font-semibold ${allMarked ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`} onClick={handleSubmit} disabled={!allMarked || submitting}>
+        <button className="px-6 py-3 rounded-lg font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50" onClick={handleSubmit} disabled={submitting}>
           {submitting ? '제출 중...' : submitted ? '다시 제출' : '제출'}
         </button>
       </div>
@@ -767,7 +955,6 @@ function App() {
   const handleUserUpdate = (updatedUser) => setSession(prev => ({ ...prev, user: updatedUser }));
 
   if (!session) return <LoginView onLogin={handleLogin} />;
-  if (session.role === 'admin') return <AdminView onLogout={handleLogout} />;
   if (session.role === 'teacher') return <TeacherView user={session.user} onLogout={handleLogout} onUserUpdate={handleUserUpdate} />;
   if (session.role === 'student') return <StudentView user={session.user} onLogout={handleLogout} onUserUpdate={handleUserUpdate} />;
   return null;
