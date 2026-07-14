@@ -321,7 +321,7 @@ function TeacherView({ user, onLogout, onUserUpdate }) {
   };
   useEffect(() => { loadClasses(); }, []);
 
-  const tabs = [['classes','반 관리'],['students','학생관리'],['homeworks','과제관리'],['submissions','제출현황']];
+  const tabs = [['classes','반 관리'],['students','학생관리'],['homeworks','과제관리']];
 
   return (
     <div className="max-w-4xl mx-auto p-4">
@@ -338,18 +338,42 @@ function TeacherView({ user, onLogout, onUserUpdate }) {
       {tab === 'classes' && <ClassManager classes={classes} teacherId={user.id} onReload={loadClasses} />}
       {tab === 'students' && <StudentManager classes={classes} teacherId={user.id} onReloadClasses={loadClasses} />}
       {tab === 'homeworks' && <HomeworkManager classes={classes} teacherId={user.id} />}
-      {tab === 'submissions' && <SubmissionView classes={classes} teacherId={user.id} />}
+    </div>
+  );
+}
+
+// ── 반 추가 모달 ──
+function AddClassModal({ onAdd, onClose }) {
+  const [name, setName] = useState('');
+
+  const handleAdd = () => {
+    if (!name.trim()) return;
+    onAdd(name.trim());
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold mb-4">반 추가</h3>
+        <input className="w-full border rounded-lg px-3 py-2 mb-4" placeholder="반 이름 (예: 고1 수학A반)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAdd()} autoFocus />
+        <div className="flex gap-2 justify-end">
+          <button className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-50" onClick={onClose}>취소</button>
+          <button className="px-4 py-2 rounded-lg bg-blue-600 text-white" onClick={handleAdd}>추가</button>
+        </div>
+      </div>
     </div>
   );
 }
 
 // ── 반 관리 ──
 function ClassManager({ classes, teacherId, onReload }) {
-  const [name, setName] = useState('');
+  const [showAddModal, setShowAddModal] = useState(false);
   const [selectedClass, setSelectedClass] = useState(null);
   const [classStudents, setClassStudents] = useState([]);
   const [allStudents, setAllStudents] = useState([]);
   const [addStudentId, setAddStudentId] = useState('');
+  const [studentCounts, setStudentCounts] = useState({});
 
   const loadClassStudents = async (classId) => {
     if (!classId) { setClassStudents([]); return; }
@@ -357,25 +381,32 @@ function ClassManager({ classes, teacherId, onReload }) {
   };
 
   const loadAllStudents = async () => {
-    setAllStudents(await DB.getAllStudents(teacherId));
+    const all = await DB.getAllStudents(teacherId);
+    setAllStudents(all);
+    // Count students per class
+    const counts = {};
+    for (const s of all) {
+      counts[s.class_id] = (counts[s.class_id] || 0) + 1;
+    }
+    setStudentCounts(counts);
   };
 
   useEffect(() => { loadAllStudents(); }, []);
   useEffect(() => { if (selectedClass) loadClassStudents(selectedClass.id); }, [selectedClass]);
 
-  const addClass = async () => {
-    if (!name.trim()) return;
-    const { data } = await sb.from('omr_classes').insert({ name: name.trim(), teacher_id: teacherId }).select().single();
-    setName('');
+  const addClass = async (name) => {
+    const { data } = await sb.from('omr_classes').insert({ name, teacher_id: teacherId }).select().single();
     await onReload();
     if (data) setSelectedClass(data);
   };
 
-  const deleteClass = async (c) => {
+  const deleteClass = async (c, e) => {
+    e.stopPropagation();
     if (!confirm(`"${c.name}" 반을 삭제하시겠습니까? 소속 학생과 과제가 모두 삭제됩니다.`)) return;
     await sb.from('omr_classes').delete().eq('id', c.id);
     if (selectedClass?.id === c.id) setSelectedClass(null);
     onReload();
+    loadAllStudents();
   };
 
   const assignStudent = async () => {
@@ -388,17 +419,11 @@ function ClassManager({ classes, teacherId, onReload }) {
 
   const removeFromClass = async (student) => {
     if (!confirm(`${student.name}을(를) 이 반에서 제거하시겠습니까?`)) return;
-    // Move to unassigned - we'll set class_id to the first available class or keep in current
-    // Actually, just remove from this class by deleting the student
-    // Per plan: remove from class = unassign. But students must belong to a class.
-    // Let's just confirm and delete from this class by removing the student entirely?
-    // No - the plan says "추가/제거" from class. Let's delete the student.
     await sb.from('omr_students').delete().eq('id', student.id);
     loadClassStudents(selectedClass.id);
     loadAllStudents();
   };
 
-  // Students not in the selected class (available to assign)
   const availableStudents = selectedClass
     ? allStudents.filter(s => s.class_id !== selectedClass.id)
     : [];
@@ -406,19 +431,21 @@ function ClassManager({ classes, teacherId, onReload }) {
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-xl shadow p-6">
-        <h2 className="text-lg font-bold mb-3">반 관리</h2>
-        <div className="flex gap-2 mb-3">
-          <input className="flex-1 border rounded-lg px-3 py-2" placeholder="반 이름 (예: 고1 수학A반)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addClass()} />
-          <button className="bg-blue-600 text-white px-4 rounded-lg" onClick={addClass}>추가</button>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold">반 관리</h2>
+          <button className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm" onClick={() => setShowAddModal(true)}>반 추가</button>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="space-y-2">
           {classes.map(c => (
-            <div key={c.id} className={`flex items-center gap-1 px-3 py-2 rounded-lg cursor-pointer border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedClass(c)}>
-              <span className="font-medium">{c.name}</span>
-              <button className="ml-1 text-red-400 hover:text-red-600 text-xs" onClick={e => { e.stopPropagation(); deleteClass(c); }}>✕</button>
+            <div key={c.id} className={`flex items-center justify-between rounded-lg p-3 cursor-pointer border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-100 bg-gray-50'}`} onClick={() => setSelectedClass(c)}>
+              <div className="flex items-center gap-3">
+                <span className="font-medium">{c.name}</span>
+                <span className="text-sm text-gray-500">학생 {studentCounts[c.id] || 0}명</span>
+              </div>
+              <button className="text-lg text-red-400 hover:text-red-600 px-2" title="삭제" onClick={e => deleteClass(c, e)}>&#128465;</button>
             </div>
           ))}
-          {classes.length === 0 && <p className="text-gray-400">반을 추가해주세요.</p>}
+          {classes.length === 0 && <p className="text-gray-400 text-center py-4">반을 추가해주세요.</p>}
         </div>
       </div>
 
@@ -426,7 +453,6 @@ function ClassManager({ classes, teacherId, onReload }) {
         <div className="bg-white rounded-xl shadow p-6">
           <h3 className="font-bold mb-3">{selectedClass.name} - 소속 학생</h3>
 
-          {/* 학생 배정 */}
           {availableStudents.length > 0 && (
             <div className="flex gap-2 mb-4">
               <select className="flex-1 border rounded-lg px-3 py-2" value={addStudentId} onChange={e => setAddStudentId(e.target.value)}>
@@ -439,7 +465,6 @@ function ClassManager({ classes, teacherId, onReload }) {
             </div>
           )}
 
-          {/* 소속 학생 목록 */}
           <div className="space-y-2">
             {classStudents.map(s => (
               <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
@@ -455,6 +480,8 @@ function ClassManager({ classes, teacherId, onReload }) {
           </div>
         </div>
       )}
+
+      {showAddModal && <AddClassModal onAdd={addClass} onClose={() => setShowAddModal(false)} />}
     </div>
   );
 }
@@ -548,9 +575,9 @@ function StudentManager({ classes, teacherId, onReloadClasses }) {
       </div>
 
       {/* 검색/필터 */}
-      <div className="flex gap-2 mb-4">
-        <input className="flex-1 border rounded-lg px-3 py-2 text-sm" placeholder="이름 검색" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
-        <select className="border rounded-lg px-3 py-2 text-sm" value={filterClassId} onChange={e => setFilterClassId(e.target.value)}>
+      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+        <input className="flex-1 border rounded-lg px-3 py-2 text-sm min-w-0" placeholder="이름 검색" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+        <select className="border rounded-lg px-3 py-2 text-sm w-full sm:w-auto" value={filterClassId} onChange={e => setFilterClassId(e.target.value)}>
           <option value="">전체 반</option>
           {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
@@ -559,14 +586,16 @@ function StudentManager({ classes, teacherId, onReloadClasses }) {
       <div className="space-y-2">
         {filtered.map(s => (
           <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3 cursor-pointer hover:bg-gray-100" onClick={() => setDetailStudent(s)}>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-medium">{s.name}</span>
-              {s.school && <span className="text-gray-400 text-sm">{s.school} {s.grade}</span>}
-              {getClassName(s.class_id) && <span className="bg-blue-50 text-blue-600 text-xs px-2 py-0.5 rounded">{getClassName(s.class_id)}</span>}
-              <span className="text-gray-400 text-xs">PW: {s.password}</span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-medium">{s.name}</span>
+                {s.school && <span className="text-gray-400 text-sm">{s.school} {s.grade}</span>}
+                <span className="text-gray-400 text-xs">PW: {s.password}</span>
+              </div>
+              {getClassName(s.class_id) && <div className="mt-1"><span className="bg-blue-50 text-blue-600 text-xs px-2 py-0.5 rounded">{getClassName(s.class_id)}</span></div>}
             </div>
-            <div onClick={e => e.stopPropagation()}>
-              <button className="text-lg text-red-400 hover:text-red-600 px-2" title="삭제" onClick={() => deleteStudent(s)}>&#128465;</button>
+            <div className="flex-shrink-0" onClick={e => e.stopPropagation()}>
+              <button className="text-red-500 hover:text-red-700 font-bold px-2" title="삭제" onClick={() => deleteStudent(s)}>✕</button>
             </div>
           </div>
         ))}
@@ -581,21 +610,42 @@ function StudentManager({ classes, teacherId, onReloadClasses }) {
   );
 }
 
-// ── 과제 관리 ──
+// ── 과제 관리 (+ 제출현황 통합) ──
 function HomeworkManager({ classes, teacherId }) {
   const [selectedClass, setSelectedClass] = useState(null);
   const [homeworks, setHomeworks] = useState([]);
   const [title, setTitle] = useState('');
   const [rangeInput, setRangeInput] = useState('');
   const [preview, setPreview] = useState([]);
+  // 제출현황 관련
+  const [expandedHw, setExpandedHw] = useState(null);
+  const [submissions, setSubmissions] = useState([]);
+  const [students, setStudents] = useState([]);
+  const [detailStudent, setDetailStudent] = useState(null);
 
-  useEffect(() => { if (classes.length > 0 && !selectedClass) setSelectedClass(classes[0]); }, [classes]);
-
-  const load = async () => {
+  const loadHomeworks = async () => {
     if (!selectedClass) { setHomeworks([]); return; }
-    setHomeworks(await DB.getHomeworks(selectedClass.id));
+    const [hw, st] = await Promise.all([DB.getHomeworks(selectedClass.id), DB.getStudents(selectedClass.id)]);
+    setHomeworks(hw);
+    setStudents(st);
   };
-  useEffect(() => { load(); }, [selectedClass]);
+  useEffect(() => { if (selectedClass) { loadHomeworks(); setExpandedHw(null); setDetailStudent(null); } }, [selectedClass]);
+
+  const loadSubmissions = async (hwId) => {
+    setSubmissions(await DB.getSubmissions(hwId));
+  };
+
+  const toggleExpand = (hw) => {
+    if (expandedHw?.id === hw.id) {
+      setExpandedHw(null);
+      setSubmissions([]);
+      setDetailStudent(null);
+    } else {
+      setExpandedHw(hw);
+      setDetailStudent(null);
+      loadSubmissions(hw.id);
+    }
+  };
 
   const handleRangeChange = (val) => {
     setRangeInput(val);
@@ -603,101 +653,31 @@ function HomeworkManager({ classes, teacherId }) {
   };
 
   const createHomework = async () => {
-    if (!selectedClass) { alert('반을 선택하세요.'); return; }
+    if (!selectedClass) return;
     if (!title.trim()) { alert('과제명을 입력하세요.'); return; }
     if (preview.length === 0) { alert('문제번호 범위를 입력하세요.'); return; }
     await sb.from('omr_homeworks').insert({ title: title.trim(), class_id: selectedClass.id, problems: preview });
     setTitle(''); setRangeInput(''); setPreview([]);
-    load();
+    loadHomeworks();
   };
 
-  const deleteHomework = async (h) => {
+  const deleteHomework = async (h, e) => {
+    e.stopPropagation();
     if (!confirm(`"${h.title}" 과제를 삭제하시겠습니까?`)) return;
     await sb.from('omr_homeworks').delete().eq('id', h.id);
-    load();
+    if (expandedHw?.id === h.id) { setExpandedHw(null); setSubmissions([]); }
+    loadHomeworks();
   };
 
-  return (
-    <div className="space-y-4">
-      {/* 반 선택 */}
-      <div className="bg-white rounded-xl shadow p-4">
-        <h2 className="text-lg font-bold mb-3">과제 관리</h2>
-        <div className="flex flex-wrap gap-2">
-          {classes.map(c => (
-            <button key={c.id} className={`px-3 py-2 rounded-lg border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedClass(c)}>{c.name}</button>
-          ))}
-          {classes.length === 0 && <p className="text-gray-400">반을 먼저 생성해주세요.</p>}
-        </div>
-      </div>
-
-      {selectedClass && (
-        <div className="bg-white rounded-xl shadow p-6">
-          <h3 className="font-bold mb-4">{selectedClass.name} - 과제</h3>
-          <div className="space-y-3 mb-4 border-b pb-4">
-            <input className="w-full border rounded-lg px-3 py-2" placeholder="과제명 (예: 수능특강 1단원)" value={title} onChange={e => setTitle(e.target.value)} />
-            <input className="w-full border rounded-lg px-3 py-2" placeholder="문제번호 범위 (예: 43~64, 87, 90~95)" value={rangeInput} onChange={e => handleRangeChange(e.target.value)} />
-            {preview.length > 0 && (
-              <div className="bg-blue-50 rounded-lg p-3">
-                <p className="text-sm text-blue-700 mb-1">미리보기 ({preview.length}문제)</p>
-                <p className="text-sm text-blue-900">{preview.join(', ')}</p>
-              </div>
-            )}
-            <button className="bg-blue-600 text-white px-6 py-2 rounded-lg" onClick={createHomework}>과제 등록</button>
-          </div>
-          <div className="space-y-2">
-            {homeworks.map(h => (
-              <div key={h.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
-                <div>
-                  <span className="font-medium">{h.title}</span>
-                  <span className="text-gray-500 text-sm ml-2">({h.problems.length}문제)</span>
-                  <p className="text-xs text-gray-400 mt-1">{h.problems.join(', ')}</p>
-                </div>
-                <button className="text-sm text-red-600 hover:underline" onClick={() => deleteHomework(h)}>삭제</button>
-              </div>
-            ))}
-            {homeworks.length === 0 && <p className="text-gray-400 text-center py-4">등록된 과제가 없습니다.</p>}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── 제출 현황 (강사) ──
-function SubmissionView({ classes, teacherId }) {
-  const [selectedClass, setSelectedClass] = useState(null);
-  const [homeworks, setHomeworks] = useState([]);
-  const [students, setStudents] = useState([]);
-  const [selectedHw, setSelectedHw] = useState(null);
-  const [submissions, setSubmissions] = useState([]);
-  const [detailStudent, setDetailStudent] = useState(null);
-
-  useEffect(() => { if (classes.length > 0 && !selectedClass) setSelectedClass(classes[0]); }, [classes]);
-
-  const load = async () => {
-    if (!selectedClass) { setHomeworks([]); setStudents([]); return; }
-    const [hw, st] = await Promise.all([DB.getHomeworks(selectedClass.id), DB.getStudents(selectedClass.id)]);
-    setHomeworks(hw);
-    setStudents(st);
-    if (hw.length > 0) setSelectedHw(hw[0]);
-    else setSelectedHw(null);
-  };
-  useEffect(() => { load(); }, [selectedClass]);
-
-  const loadSubmissions = async () => {
-    if (!selectedHw) return;
-    setSubmissions(await DB.getSubmissions(selectedHw.id));
-  };
-  useEffect(() => { loadSubmissions(); }, [selectedHw]);
-
+  // 제출현황 계산
   const submittedIds = new Set(submissions.map(s => s.student_id));
   const submittedStudents = students.filter(s => submittedIds.has(s.id));
   const unsubmittedStudents = students.filter(s => !submittedIds.has(s.id));
 
   const errorRates = useMemo(() => {
-    if (!selectedHw || submissions.length === 0) return {};
+    if (!expandedHw || submissions.length === 0) return {};
     const rates = {};
-    for (const p of selectedHw.problems) {
+    for (const p of expandedHw.problems) {
       let wrong = 0, total = 0;
       for (const sub of submissions) {
         if (sub.results && sub.results[String(p)] !== undefined) {
@@ -708,7 +688,7 @@ function SubmissionView({ classes, teacherId }) {
       rates[p] = total > 0 ? Math.round((wrong / total) * 100) : null;
     }
     return rates;
-  }, [selectedHw, submissions]);
+  }, [expandedHw, submissions]);
 
   const getColor = (rate) => {
     if (rate === null) return 'bg-gray-100';
@@ -721,107 +701,144 @@ function SubmissionView({ classes, teacherId }) {
 
   const getStudentSubmission = (studentId) => submissions.find(s => s.student_id === studentId);
 
+  // 반 리스트 화면
+  if (!selectedClass) {
+    return (
+      <div className="bg-white rounded-xl shadow p-6">
+        <h2 className="text-lg font-bold mb-4">과제 관리</h2>
+        <div className="space-y-2">
+          {classes.map(c => (
+            <div key={c.id} className="flex items-center justify-between bg-gray-50 hover:bg-gray-100 rounded-lg p-4 cursor-pointer" onClick={() => setSelectedClass(c)}>
+              <span className="font-medium">{c.name}</span>
+              <span className="text-gray-400 text-sm">&rsaquo;</span>
+            </div>
+          ))}
+          {classes.length === 0 && <p className="text-gray-400 text-center py-4">반을 먼저 생성해주세요.</p>}
+        </div>
+      </div>
+    );
+  }
+
+  // 과제 설정 화면 (반 선택됨)
   return (
     <div className="space-y-4">
-      {/* 반 선택 */}
-      <div className="bg-white rounded-xl shadow p-4">
-        <h2 className="text-lg font-bold mb-3">제출 현황</h2>
-        <div className="flex flex-wrap gap-2 mb-3">
-          {classes.map(c => (
-            <button key={c.id} className={`px-3 py-2 rounded-lg border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedClass(c)}>{c.name}</button>
-          ))}
+      <div className="bg-white rounded-xl shadow p-6">
+        <div className="flex items-center gap-3 mb-4">
+          <button className="text-blue-600 hover:underline text-sm" onClick={() => { setSelectedClass(null); setExpandedHw(null); setDetailStudent(null); }}>&larr; 반 목록</button>
+          <h2 className="text-lg font-bold">{selectedClass.name} 과제 관리</h2>
         </div>
-        {/* 과제 선택 */}
-        {selectedClass && (
-          <div className="flex flex-wrap gap-2">
-            {homeworks.map(h => (
-              <button key={h.id} className={`px-3 py-1.5 rounded-lg text-sm border ${selectedHw?.id === h.id ? 'border-indigo-500 bg-indigo-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedHw(h)}>{h.title}</button>
-            ))}
-          </div>
-        )}
-      </div>
 
-      {selectedHw && (
-        <>
-          {/* 제출 현황 요약 */}
-          <div className="bg-white rounded-xl shadow p-4">
-            <div className="flex items-center gap-4 mb-4">
-              <h3 className="font-bold">{selectedHw.title}</h3>
-              <span className="text-sm bg-blue-100 text-blue-800 px-2 py-1 rounded">{submittedStudents.length}/{students.length}명 제출</span>
-              <button className="text-sm text-blue-600 hover:underline ml-auto" onClick={loadSubmissions}>새로고침</button>
-            </div>
-
-            <div className="mb-3">
-              <p className="text-sm font-medium text-green-700 mb-1">제출 완료 ({submittedStudents.length}명)</p>
-              <div className="flex flex-wrap gap-2">
-                {submittedStudents.map(s => {
-                  const sub = getStudentSubmission(s.id);
-                  return (
-                    <button key={s.id} className="bg-green-50 border border-green-200 rounded-lg px-3 py-1.5 text-sm hover:bg-green-100" onClick={() => setDetailStudent(detailStudent?.id === s.id ? null : s)}>
-                      {s.name} <span className="text-green-600">({sub?.correct_count}O/{sub?.wrong_count}X)</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {unsubmittedStudents.length > 0 && (
-              <div>
-                <p className="text-sm font-medium text-red-700 mb-1">미제출 ({unsubmittedStudents.length}명)</p>
-                <div className="flex flex-wrap gap-2">
-                  {unsubmittedStudents.map(s => (
-                    <span key={s.id} className="bg-red-50 border border-red-200 rounded-lg px-3 py-1.5 text-sm">{s.name}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* 학생 상세 결과 */}
-          {detailStudent && getStudentSubmission(detailStudent.id) && (
-            <div className="bg-white rounded-xl shadow p-4">
-              <h3 className="font-bold mb-3">{detailStudent.name} 상세 결과</h3>
-              <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
-                {selectedHw.problems.map(p => {
-                  const result = getStudentSubmission(detailStudent.id)?.results?.[String(p)];
-                  return (
-                    <div key={p} className={`text-center rounded-lg p-2 ${result === 'O' ? 'bg-blue-100' : result === 'X' ? 'bg-red-100' : 'bg-gray-100'}`}>
-                      <div className="text-xs text-gray-500">{p}번</div>
-                      <div className={`font-bold ${result === 'O' ? 'text-blue-600' : 'text-red-600'}`}>{result || '-'}</div>
-                    </div>
-                  );
-                })}
-              </div>
+        {/* 과제 등록 폼 */}
+        <div className="space-y-3 mb-4 border-b pb-4">
+          <input className="w-full border rounded-lg px-3 py-2" placeholder="과제명 (예: 수능특강 1단원)" value={title} onChange={e => setTitle(e.target.value)} />
+          <input className="w-full border rounded-lg px-3 py-2" placeholder="문제번호 범위 (예: 43~64, 87, 90~95)" value={rangeInput} onChange={e => handleRangeChange(e.target.value)} />
+          {preview.length > 0 && (
+            <div className="bg-blue-50 rounded-lg p-3">
+              <p className="text-sm text-blue-700 mb-1">미리보기 ({preview.length}문제)</p>
+              <p className="text-sm text-blue-900">{preview.join(', ')}</p>
             </div>
           )}
+          <button className="bg-blue-600 text-white px-6 py-2 rounded-lg" onClick={createHomework}>과제 등록</button>
+        </div>
 
-          {/* 문항별 오답률 통계 */}
-          {submissions.length > 0 && (
-            <div className="bg-white rounded-xl shadow p-4">
-              <h3 className="font-bold mb-3">문항별 오답률</h3>
-              <div className="flex flex-wrap gap-1 mb-3">
-                <span className="text-xs px-2 py-1 rounded bg-blue-100">0%</span>
-                <span className="text-xs px-2 py-1 rounded bg-green-100">1~25%</span>
-                <span className="text-xs px-2 py-1 rounded bg-yellow-100">26~50%</span>
-                <span className="text-xs px-2 py-1 rounded bg-orange-100">51~75%</span>
-                <span className="text-xs px-2 py-1 rounded bg-red-100">76~100%</span>
-              </div>
-              <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
-                {selectedHw.problems.map(p => (
-                  <div key={p} className={`text-center rounded-lg p-2 ${getColor(errorRates[p])}`}>
-                    <div className="text-xs text-gray-600">{p}번</div>
-                    <div className="font-bold text-sm">{errorRates[p] !== null ? errorRates[p] + '%' : '-'}</div>
+        {/* 과제 목록 */}
+        <div className="space-y-2">
+          {homeworks.map(h => (
+            <div key={h.id}>
+              <div className={`flex items-center justify-between rounded-lg p-3 cursor-pointer border-2 ${expandedHw?.id === h.id ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 bg-gray-50 hover:border-gray-300'}`} onClick={() => toggleExpand(h)}>
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400 text-sm">{expandedHw?.id === h.id ? '▼' : '▶'}</span>
+                  <div>
+                    <span className="font-medium">{h.title}</span>
+                    <span className="text-gray-500 text-sm ml-2">({h.problems.length}문제)</span>
                   </div>
-                ))}
+                </div>
+                <button className="text-sm text-red-600 hover:underline" onClick={e => deleteHomework(h, e)}>삭제</button>
               </div>
-            </div>
-          )}
-        </>
-      )}
 
-      {selectedClass && homeworks.length === 0 && (
-        <div className="bg-white rounded-xl shadow p-8 text-center text-gray-400">등록된 과제가 없습니다.</div>
-      )}
+              {/* 제출현황 인라인 펼침 */}
+              {expandedHw?.id === h.id && (
+                <div className="ml-4 mt-2 space-y-3">
+                  {/* 제출 요약 */}
+                  <div className="bg-white border rounded-lg p-4">
+                    <div className="flex items-center gap-4 mb-3">
+                      <span className="text-sm bg-blue-100 text-blue-800 px-2 py-1 rounded">{submittedStudents.length}/{students.length}명 제출</span>
+                      <button className="text-sm text-blue-600 hover:underline ml-auto" onClick={() => loadSubmissions(h.id)}>새로고침</button>
+                    </div>
+
+                    <div className="mb-3">
+                      <p className="text-sm font-medium text-green-700 mb-1">제출 완료 ({submittedStudents.length}명)</p>
+                      <div className="flex flex-wrap gap-2">
+                        {submittedStudents.map(s => {
+                          const sub = getStudentSubmission(s.id);
+                          return (
+                            <button key={s.id} className="bg-green-50 border border-green-200 rounded-lg px-3 py-1.5 text-sm hover:bg-green-100" onClick={() => setDetailStudent(detailStudent?.id === s.id ? null : s)}>
+                              {s.name} <span className="text-green-600">({sub?.correct_count}O/{sub?.wrong_count}X)</span>
+                            </button>
+                          );
+                        })}
+                        {submittedStudents.length === 0 && <span className="text-gray-400 text-sm">아직 제출한 학생이 없습니다.</span>}
+                      </div>
+                    </div>
+
+                    {unsubmittedStudents.length > 0 && (
+                      <div>
+                        <p className="text-sm font-medium text-red-700 mb-1">미제출 ({unsubmittedStudents.length}명)</p>
+                        <div className="flex flex-wrap gap-2">
+                          {unsubmittedStudents.map(s => (
+                            <span key={s.id} className="bg-red-50 border border-red-200 rounded-lg px-3 py-1.5 text-sm">{s.name}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 학생 상세 결과 */}
+                  {detailStudent && getStudentSubmission(detailStudent.id) && (
+                    <div className="bg-white border rounded-lg p-4">
+                      <h4 className="font-bold mb-3">{detailStudent.name} 상세 결과</h4>
+                      <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
+                        {expandedHw.problems.map(p => {
+                          const result = getStudentSubmission(detailStudent.id)?.results?.[String(p)];
+                          return (
+                            <div key={p} className={`text-center rounded-lg p-2 ${result === 'O' ? 'bg-blue-100' : result === 'X' ? 'bg-red-100' : 'bg-gray-100'}`}>
+                              <div className="text-xs text-gray-500">{p}번</div>
+                              <div className={`font-bold ${result === 'O' ? 'text-blue-600' : 'text-red-600'}`}>{result || '-'}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 문항별 오답률 */}
+                  {submissions.length > 0 && (
+                    <div className="bg-white border rounded-lg p-4">
+                      <h4 className="font-bold mb-3">문항별 오답률</h4>
+                      <div className="flex flex-wrap gap-1 mb-3">
+                        <span className="text-xs px-2 py-1 rounded bg-blue-100">0%</span>
+                        <span className="text-xs px-2 py-1 rounded bg-green-100">1~25%</span>
+                        <span className="text-xs px-2 py-1 rounded bg-yellow-100">26~50%</span>
+                        <span className="text-xs px-2 py-1 rounded bg-orange-100">51~75%</span>
+                        <span className="text-xs px-2 py-1 rounded bg-red-100">76~100%</span>
+                      </div>
+                      <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
+                        {expandedHw.problems.map(p => (
+                          <div key={p} className={`text-center rounded-lg p-2 ${getColor(errorRates[p])}`}>
+                            <div className="text-xs text-gray-600">{p}번</div>
+                            <div className="font-bold text-sm">{errorRates[p] !== null ? errorRates[p] + '%' : '-'}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+          {homeworks.length === 0 && <p className="text-gray-400 text-center py-4">등록된 과제가 없습니다.</p>}
+        </div>
+      </div>
     </div>
   );
 }
