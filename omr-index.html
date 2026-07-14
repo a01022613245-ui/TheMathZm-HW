@@ -321,7 +321,7 @@ function TeacherView({ user, onLogout, onUserUpdate }) {
   };
   useEffect(() => { loadClasses(); }, []);
 
-  const tabs = [['classes','클래스 관리'],['students','학생관리'],['homeworks','과제관리'],['submissions','제출현황']];
+  const tabs = [['classes','반 관리'],['students','학생관리'],['homeworks','과제관리'],['submissions','제출현황']];
 
   return (
     <div className="max-w-4xl mx-auto p-4">
@@ -343,7 +343,7 @@ function TeacherView({ user, onLogout, onUserUpdate }) {
   );
 }
 
-// ── 클래스 관리 ──
+// ── 반 관리 ──
 function ClassManager({ classes, teacherId, onReload }) {
   const [name, setName] = useState('');
   const [selectedClass, setSelectedClass] = useState(null);
@@ -372,7 +372,7 @@ function ClassManager({ classes, teacherId, onReload }) {
   };
 
   const deleteClass = async (c) => {
-    if (!confirm(`"${c.name}" 클래스를 삭제하시겠습니까? 소속 학생과 과제가 모두 삭제됩니다.`)) return;
+    if (!confirm(`"${c.name}" 반을 삭제하시겠습니까? 소속 학생과 과제가 모두 삭제됩니다.`)) return;
     await sb.from('omr_classes').delete().eq('id', c.id);
     if (selectedClass?.id === c.id) setSelectedClass(null);
     onReload();
@@ -387,7 +387,7 @@ function ClassManager({ classes, teacherId, onReload }) {
   };
 
   const removeFromClass = async (student) => {
-    if (!confirm(`${student.name}을(를) 이 클래스에서 제거하시겠습니까?`)) return;
+    if (!confirm(`${student.name}을(를) 이 반에서 제거하시겠습니까?`)) return;
     // Move to unassigned - we'll set class_id to the first available class or keep in current
     // Actually, just remove from this class by deleting the student
     // Per plan: remove from class = unassign. But students must belong to a class.
@@ -406,9 +406,9 @@ function ClassManager({ classes, teacherId, onReload }) {
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-xl shadow p-6">
-        <h2 className="text-lg font-bold mb-3">클래스 관리</h2>
+        <h2 className="text-lg font-bold mb-3">반 관리</h2>
         <div className="flex gap-2 mb-3">
-          <input className="flex-1 border rounded-lg px-3 py-2" placeholder="클래스 이름 (예: 고1 수학A반)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addClass()} />
+          <input className="flex-1 border rounded-lg px-3 py-2" placeholder="반 이름 (예: 고1 수학A반)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addClass()} />
           <button className="bg-blue-600 text-white px-4 rounded-lg" onClick={addClass}>추가</button>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -418,7 +418,7 @@ function ClassManager({ classes, teacherId, onReload }) {
               <button className="ml-1 text-red-400 hover:text-red-600 text-xs" onClick={e => { e.stopPropagation(); deleteClass(c); }}>✕</button>
             </div>
           ))}
-          {classes.length === 0 && <p className="text-gray-400">클래스를 추가해주세요.</p>}
+          {classes.length === 0 && <p className="text-gray-400">반을 추가해주세요.</p>}
         </div>
       </div>
 
@@ -459,29 +459,72 @@ function ClassManager({ classes, teacherId, onReload }) {
   );
 }
 
-// ── 학생 관리 ──
-function StudentManager({ classes, teacherId, onReloadClasses }) {
-  const [students, setStudents] = useState([]);
+// ── 학생 추가 모달 ──
+function AddStudentModal({ classes, onAdd, onClose }) {
   const [name, setName] = useState('');
   const [school, setSchool] = useState('');
   const [grade, setGrade] = useState('');
   const [classId, setClassId] = useState('');
-  const [msg, setMsg] = useState('');
-  const [detailStudent, setDetailStudent] = useState(null);
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
 
-  const load = async () => { setStudents(await DB.getAllStudents(teacherId)); };
-  useEffect(() => { load(); }, []);
-
-  const addStudent = async () => {
+  const handleAdd = async () => {
     if (!name.trim()) return;
-    if (!classId) { alert('클래스를 선택하세요.'); return; }
+    if (!classId) { alert('반을 선택하세요.'); return; }
+    setLoading(true);
     const loginId = await makeLoginId('TMZ', name.trim(), 'omr_students');
     const pw = genPassword();
     await sb.from('omr_students').insert({ name: name.trim(), school: school.trim(), grade: grade.trim(), login_id: loginId, password: pw, class_id: classId });
-    setName(''); setSchool(''); setGrade('');
-    setMsg(`학생 추가: ID=${loginId}, 비밀번호=${pw}`);
-    load();
+    setResult({ loginId, pw });
+    setLoading(false);
+    onAdd();
   };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold mb-4">학생 추가</h3>
+        {!result ? (
+          <div className="space-y-3">
+            <input className="w-full border rounded-lg px-3 py-2" placeholder="이름" value={name} onChange={e => setName(e.target.value)} />
+            <input className="w-full border rounded-lg px-3 py-2" placeholder="학교 (선택)" value={school} onChange={e => setSchool(e.target.value)} />
+            <input className="w-full border rounded-lg px-3 py-2" placeholder="학년" value={grade} onChange={e => setGrade(e.target.value)} />
+            <select className="w-full border rounded-lg px-3 py-2" value={classId} onChange={e => setClassId(e.target.value)}>
+              <option value="">반 선택</option>
+              {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <div className="flex gap-2 justify-end pt-2">
+              <button className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-50" onClick={onClose}>취소</button>
+              <button className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50" onClick={handleAdd} disabled={loading}>{loading ? '추가 중...' : '추가'}</button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-sm">
+              <p className="font-medium text-green-800 mb-2">학생이 추가되었습니다.</p>
+              <p>아이디: <span className="font-mono font-bold">{result.loginId}</span></p>
+              <p>비밀번호: <span className="font-mono font-bold">{result.pw}</span></p>
+            </div>
+            <div className="flex justify-end">
+              <button className="px-4 py-2 rounded-lg bg-blue-600 text-white" onClick={onClose}>닫기</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── 학생 관리 ──
+function StudentManager({ classes, teacherId, onReloadClasses }) {
+  const [students, setStudents] = useState([]);
+  const [detailStudent, setDetailStudent] = useState(null);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterClassId, setFilterClassId] = useState('');
+
+  const load = async () => { setStudents(await DB.getAllStudents(teacherId)); };
+  useEffect(() => { load(); }, []);
 
   const deleteStudent = async (s) => {
     if (!confirm(`${s.name} 학생을 삭제하시겠습니까?`)) return;
@@ -489,48 +532,51 @@ function StudentManager({ classes, teacherId, onReloadClasses }) {
     load();
   };
 
-  const resetPassword = async (s) => {
-    const pw = genPassword();
-    await sb.from('omr_students').update({ password: pw }).eq('id', s.id);
-    setMsg(`${s.name} 비밀번호 초기화: ${pw}`);
-    load();
-  };
-
   const getClassName = (cid) => classes.find(c => c.id === cid)?.name || '';
+
+  const filtered = students.filter(s => {
+    const nameMatch = !searchQuery || s.name.includes(searchQuery);
+    const classMatch = !filterClassId || s.class_id === filterClassId;
+    return nameMatch && classMatch;
+  });
 
   return (
     <div className="bg-white rounded-xl shadow p-6">
-      <h2 className="text-lg font-bold mb-4">학생 관리</h2>
-      {msg && <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4 text-sm text-green-800">{msg}</div>}
-      <div className="flex gap-2 mb-4 flex-wrap">
-        <input className="border rounded-lg px-3 py-2 w-32" placeholder="이름" value={name} onChange={e => setName(e.target.value)} />
-        <input className="border rounded-lg px-3 py-2 w-32" placeholder="학교 (선택)" value={school} onChange={e => setSchool(e.target.value)} />
-        <input className="border rounded-lg px-3 py-2 w-20" placeholder="학년" value={grade} onChange={e => setGrade(e.target.value)} />
-        <select className="border rounded-lg px-3 py-2" value={classId} onChange={e => setClassId(e.target.value)}>
-          <option value="">클래스 선택</option>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-bold">학생 관리</h2>
+        <button className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm" onClick={() => setShowAddModal(true)}>학생 추가</button>
+      </div>
+
+      {/* 검색/필터 */}
+      <div className="flex gap-2 mb-4">
+        <input className="flex-1 border rounded-lg px-3 py-2 text-sm" placeholder="이름 검색" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+        <select className="border rounded-lg px-3 py-2 text-sm" value={filterClassId} onChange={e => setFilterClassId(e.target.value)}>
+          <option value="">전체 반</option>
           {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <button className="bg-blue-600 text-white px-4 rounded-lg" onClick={addStudent}>추가</button>
       </div>
+
       <div className="space-y-2">
-        {students.map(s => (
+        {filtered.map(s => (
           <div key={s.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3 cursor-pointer hover:bg-gray-100" onClick={() => setDetailStudent(s)}>
-            <div>
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="font-medium">{s.name}</span>
-              <span className="text-gray-500 text-sm ml-2">({s.login_id})</span>
-              {s.school && <span className="text-gray-400 text-sm ml-2">{s.school} {s.grade}</span>}
-              {getClassName(s.class_id) && <span className="bg-blue-50 text-blue-600 text-xs px-2 py-0.5 rounded ml-2">{getClassName(s.class_id)}</span>}
+              {s.school && <span className="text-gray-400 text-sm">{s.school} {s.grade}</span>}
+              {getClassName(s.class_id) && <span className="bg-blue-50 text-blue-600 text-xs px-2 py-0.5 rounded">{getClassName(s.class_id)}</span>}
+              <span className="text-gray-400 text-xs">PW: {s.password}</span>
             </div>
-            <div className="flex gap-2" onClick={e => e.stopPropagation()}>
-              <button className="text-sm text-blue-600 hover:underline" onClick={() => resetPassword(s)}>비밀번호 초기화</button>
-              <button className="text-sm text-red-600 hover:underline" onClick={() => deleteStudent(s)}>삭제</button>
+            <div onClick={e => e.stopPropagation()}>
+              <button className="text-lg text-red-400 hover:text-red-600 px-2" title="삭제" onClick={() => deleteStudent(s)}>&#128465;</button>
             </div>
           </div>
         ))}
-        {students.length === 0 && <p className="text-gray-400 text-center py-4">등록된 학생이 없습니다.</p>}
+        {filtered.length === 0 && <p className="text-gray-400 text-center py-4">
+          {students.length === 0 ? '등록된 학생이 없습니다.' : '검색 결과가 없습니다.'}
+        </p>}
       </div>
 
       {detailStudent && <StudentDetailModal student={detailStudent} classes={classes} onClose={() => setDetailStudent(null)} />}
+      {showAddModal && <AddStudentModal classes={classes} onAdd={() => { load(); }} onClose={() => setShowAddModal(false)} />}
     </div>
   );
 }
@@ -557,7 +603,7 @@ function HomeworkManager({ classes, teacherId }) {
   };
 
   const createHomework = async () => {
-    if (!selectedClass) { alert('클래스를 선택하세요.'); return; }
+    if (!selectedClass) { alert('반을 선택하세요.'); return; }
     if (!title.trim()) { alert('과제명을 입력하세요.'); return; }
     if (preview.length === 0) { alert('문제번호 범위를 입력하세요.'); return; }
     await sb.from('omr_homeworks').insert({ title: title.trim(), class_id: selectedClass.id, problems: preview });
@@ -573,14 +619,14 @@ function HomeworkManager({ classes, teacherId }) {
 
   return (
     <div className="space-y-4">
-      {/* 클래스 선택 */}
+      {/* 반 선택 */}
       <div className="bg-white rounded-xl shadow p-4">
         <h2 className="text-lg font-bold mb-3">과제 관리</h2>
         <div className="flex flex-wrap gap-2">
           {classes.map(c => (
             <button key={c.id} className={`px-3 py-2 rounded-lg border-2 ${selectedClass?.id === c.id ? 'border-blue-500 bg-blue-50 font-medium' : 'border-gray-200 hover:border-gray-300'}`} onClick={() => setSelectedClass(c)}>{c.name}</button>
           ))}
-          {classes.length === 0 && <p className="text-gray-400">클래스를 먼저 생성해주세요.</p>}
+          {classes.length === 0 && <p className="text-gray-400">반을 먼저 생성해주세요.</p>}
         </div>
       </div>
 
@@ -677,7 +723,7 @@ function SubmissionView({ classes, teacherId }) {
 
   return (
     <div className="space-y-4">
-      {/* 클래스 선택 */}
+      {/* 반 선택 */}
       <div className="bg-white rounded-xl shadow p-4">
         <h2 className="text-lg font-bold mb-3">제출 현황</h2>
         <div className="flex flex-wrap gap-2 mb-3">
