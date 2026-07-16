@@ -844,6 +844,31 @@ function HomeworkManager({ classes, teacherId }) {
                       </div>
                     ))}
                   </div>
+                  {/* 구간별 요약 */}
+                  {(() => {
+                    const bands = [
+                      { label: '0%', color: 'text-blue-500', test: r => r === 0 },
+                      { label: '1~25%', color: 'text-green-500', test: r => r >= 1 && r <= 25 },
+                      { label: '26~50%', color: 'text-yellow-500', test: r => r >= 26 && r <= 50 },
+                      { label: '51~75%', color: 'text-orange-500', test: r => r >= 51 && r <= 75 },
+                      { label: '76~100%', color: 'text-red-500', test: r => r >= 76 },
+                    ];
+                    return (
+                      <div className="mt-3 space-y-1 text-sm">
+                        {bands.map(band => {
+                          const nums = expandedHw.problems.filter(p => errorRates[p] !== null && band.test(errorRates[p]));
+                          if (nums.length === 0) return null;
+                          return (
+                            <div key={band.label}>
+                              <span className={`font-bold ${band.color}`}>●</span>
+                              <span className={`font-semibold ${band.color} ml-1`}>{band.label}</span>
+                              <span className="text-gray-600"> ({nums.length}개): {nums.map(n => n + '번').join(', ')}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
