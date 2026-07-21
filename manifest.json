@@ -1,7 +1,7 @@
 {
-  "name": "TheMathZm 숙제",
-  "short_name": "더맺음 숙제",
-  "description": "더맺음 수학학원 온라인 숙제 제출 시스템",
+  "name": "더맺음 과제 관리",
+  "short_name": "TMZ",
+  "description": "더맺음 수학학원 과제 관리 시스템",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
