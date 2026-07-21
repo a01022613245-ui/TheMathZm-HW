@@ -57,6 +57,15 @@ async function makeLoginId(prefix, name, table) {
   return base + i;
 }
 
+const DAY_NAMES = ['일','월','화','수','목','금','토'];
+
+function formatHomeworkDate(date) {
+  const m = date.getMonth() + 1;
+  const d = date.getDate();
+  const day = DAY_NAMES[date.getDay()];
+  return `${m}/${d} ${day}`;
+}
+
 // ── CRUD ──
 const DB = {
   async getTeachers() { const { data } = await sb.from('omr_teachers').select('*').order('created_at'); return data || []; },
@@ -82,6 +91,16 @@ const DB = {
     if (classId) q = q.eq('class_id', classId);
     const { data } = await q; return data || [];
   },
+  async getHomeworksWithSections(classId) {
+    const homeworks = await DB.getHomeworks(classId);
+    if (homeworks.length === 0) return [];
+    const hwIds = homeworks.map(h => h.id);
+    const { data: sections } = await sb.from('omr_homework_sections').select('*, omr_textbooks(name)').in('homework_id', hwIds).order('sort_order');
+    return homeworks.map(h => ({
+      ...h,
+      sections: (sections || []).filter(s => s.homework_id === h.id)
+    }));
+  },
   async getSubmissions(homeworkId) {
     let q = sb.from('omr_submissions').select('*');
     if (homeworkId) q = q.eq('homework_id', homeworkId);
@@ -95,7 +114,19 @@ const DB = {
     const { data } = await sb.from('omr_submissions').select('*').eq('student_id', studentId);
     return data || [];
   },
+  async getTextbooks(classId) {
+    const { data } = await sb.from('omr_textbooks').select('*').eq('class_id', classId).order('created_at');
+    return data || [];
+  },
 };
+
+// 과제의 전체 문제 수 계산 (섹션 기반 or 레거시)
+function getTotalProblems(hw) {
+  if (hw.sections && hw.sections.length > 0) {
+    return hw.sections.reduce((sum, s) => sum + s.problems.length, 0);
+  }
+  return (hw.problems || []).length;
+}
 
 // ── 로그인 화면 ──
 function LoginView({ onLogin }) {
@@ -108,14 +139,11 @@ function LoginView({ onLogin }) {
   const handleLogin = async () => {
     setError('');
     if (!loginId || !password) { setError('ID와 비밀번호를 입력하세요.'); return; }
-    // 아이디 기억하기
     if (rememberMe) localStorage.setItem('omr_saved_id', loginId);
     else localStorage.removeItem('omr_saved_id');
     setLoading(true);
-    // Try teacher
     const { data: teacher } = await sb.from('omr_teachers').select('*').eq('login_id', loginId).eq('password', password).maybeSingle();
     if (teacher) { setLoading(false); onLogin({ role: 'teacher', user: teacher }); return; }
-    // Try student
     const { data: student } = await sb.from('omr_students').select('*').eq('login_id', loginId).eq('password', password).maybeSingle();
     if (student) { setLoading(false); onLogin({ role: 'student', user: student }); return; }
     setLoading(false);
@@ -194,8 +222,7 @@ function StudentDetailModal({ student, classes, onClose }) {
     const load = async () => {
       setLoading(true);
       const subs = await DB.getStudentSubmissions(student.id);
-      // Get all homeworks for this student's class
-      const hws = await DB.getHomeworks(student.class_id);
+      const hws = await DB.getHomeworksWithSections(student.class_id);
       setSubmissions(subs);
       setHomeworks(hws);
       setLoading(false);
@@ -203,11 +230,8 @@ function StudentDetailModal({ student, classes, onClose }) {
     load();
   }, [student.id]);
 
-  // Build chart data
   useEffect(() => {
     if (loading || !chartRef.current) return;
-
-    // Destroy previous chart
     if (chartInstance.current) chartInstance.current.destroy();
 
     const submittedHws = homeworks.filter(hw => submissions.some(s => s.homework_id === hw.id));
@@ -265,21 +289,18 @@ function StudentDetailModal({ student, classes, onClose }) {
           <p className="text-center text-gray-400 py-8">로딩 중...</p>
         ) : (
           <>
-            {/* 전체 정답률 */}
             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg p-4 mb-4 text-center">
               <p className="text-sm text-gray-600 mb-1">전체 정답률</p>
               <p className="text-3xl font-bold text-blue-600">{overallRate}%</p>
               <p className="text-sm text-gray-500 mt-1">{totalCorrect}O / {totalWrong}X (총 {submissions.length}개 과제 제출)</p>
             </div>
 
-            {/* 차트 */}
             {submissions.length > 0 && (
               <div className="mb-4" style={{ height: '200px' }}>
                 <canvas ref={chartRef}></canvas>
               </div>
             )}
 
-            {/* 제출 이력 */}
             <h4 className="font-bold text-sm mb-2">제출 이력</h4>
             <div className="space-y-2">
               {homeworks.map(hw => {
@@ -328,7 +349,6 @@ function TeacherView({ user, onLogout, onUserUpdate }) {
       <Header title={`${user.name} 강사`} onLogout={onLogout} onPasswordChange={() => setShowPwModal(true)} />
       {showPwModal && <PasswordModal role="teacher" user={user} onClose={() => setShowPwModal(false)} onChanged={pw => onUserUpdate({ ...user, password: pw })} />}
 
-      {/* 상단 4개 탭 한 줄 */}
       <div className="flex gap-1 mb-4 bg-white rounded-xl shadow p-1">
         {tabs.map(([k,v]) => (
           <button key={k} className={`flex-1 px-3 py-2.5 rounded-lg font-medium text-sm transition-colors ${tab===k ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`} onClick={() => setTab(k)}>{v}</button>
@@ -366,37 +386,180 @@ function AddClassModal({ onAdd, onClose }) {
   );
 }
 
-function AddHomeworkModal({ onAdd, onClose }) {
-  const [title, setTitle] = useState('');
-  const [rangeInput, setRangeInput] = useState('');
-  const [preview, setPreview] = useState([]);
-
-  const handleRangeChange = (val) => {
-    setRangeInput(val);
-    setPreview(parseProblems(val));
-  };
+// ── 교재 추가 모달 ──
+function AddTextbookModal({ onAdd, onClose }) {
+  const [name, setName] = useState('');
 
   const handleAdd = () => {
-    if (!title.trim()) { alert('과제명을 입력하세요.'); return; }
-    if (preview.length === 0) { alert('문제번호 범위를 입력하세요.'); return; }
-    onAdd(title.trim(), preview);
+    if (!name.trim()) return;
+    onAdd(name.trim());
     onClose();
   };
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
-        <h3 className="text-lg font-bold mb-4">과제 등록</h3>
-        <div className="space-y-3">
-          <input className="w-full border rounded-lg px-3 py-2" placeholder="과제명 (예: 수능특강 1단원)" value={title} onChange={e => setTitle(e.target.value)} autoFocus />
-          <input className="w-full border rounded-lg px-3 py-2" placeholder="문제번호 범위 (예: 43~64, 87, 90~95)" value={rangeInput} onChange={e => handleRangeChange(e.target.value)} />
-          {preview.length > 0 && (
-            <div className="bg-blue-50 rounded-lg p-3">
-              <p className="text-sm text-blue-700 mb-1">미리보기 ({preview.length}문제)</p>
-              <p className="text-sm text-blue-900">{preview.join(', ')}</p>
-            </div>
-          )}
+      <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold mb-4">교재 추가</h3>
+        <input className="w-full border rounded-lg px-3 py-2 mb-4" placeholder="교재 이름 (예: 수능특강 수학1)" value={name} onChange={e => setName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAdd()} autoFocus />
+        <div className="flex gap-2 justify-end">
+          <button className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-50" onClick={onClose}>취소</button>
+          <button className="px-4 py-2 rounded-lg bg-blue-600 text-white" onClick={handleAdd}>추가</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 미니 캘린더 ──
+function MiniCalendar({ selectedDate, onSelect }) {
+  const [viewDate, setViewDate] = useState(() => selectedDate || new Date());
+
+  const year = viewDate.getFullYear();
+  const month = viewDate.getMonth();
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const days = [];
+  for (let i = 0; i < firstDay; i++) days.push(null);
+  for (let i = 1; i <= daysInMonth; i++) days.push(i);
+
+  const prevMonth = () => setViewDate(new Date(year, month - 1, 1));
+  const nextMonth = () => setViewDate(new Date(year, month + 1, 1));
+
+  const isSelected = (day) => {
+    if (!selectedDate || !day) return false;
+    return selectedDate.getFullYear() === year &&
+           selectedDate.getMonth() === month &&
+           selectedDate.getDate() === day;
+  };
+
+  const isToday = (day) => {
+    if (!day) return false;
+    const today = new Date();
+    return today.getFullYear() === year && today.getMonth() === month && today.getDate() === day;
+  };
+
+  return (
+    <div className="bg-gray-50 rounded-lg p-3">
+      <div className="flex items-center justify-between mb-2">
+        <button className="w-8 h-8 rounded-full hover:bg-gray-200 flex items-center justify-center text-gray-600" onClick={prevMonth}>&lsaquo;</button>
+        <span className="font-medium text-sm">{year}년 {month + 1}월</span>
+        <button className="w-8 h-8 rounded-full hover:bg-gray-200 flex items-center justify-center text-gray-600" onClick={nextMonth}>&rsaquo;</button>
+      </div>
+      <div className="grid grid-cols-7 gap-1 text-center">
+        {DAY_NAMES.map((d, i) => (
+          <div key={d} className={`text-xs py-1 ${i === 0 ? 'text-red-400' : i === 6 ? 'text-blue-400' : 'text-gray-400'}`}>{d}</div>
+        ))}
+        {days.map((day, i) => (
+          <button
+            key={i}
+            className={`text-sm py-1.5 rounded-lg transition-colors
+              ${!day ? '' : 'cursor-pointer hover:bg-blue-100'}
+              ${isSelected(day) ? 'bg-blue-600 text-white font-bold' : ''}
+              ${isToday(day) && !isSelected(day) ? 'bg-blue-50 text-blue-600 font-medium' : ''}
+              ${!day ? 'invisible' : ''}
+            `}
+            onClick={() => day && onSelect(new Date(year, month, day))}
+            disabled={!day}
+          >
+            {day || ''}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── 과제 등록 모달 (캘린더 + 교재 + 단원) ──
+function AddHomeworkModal({ textbooks, onAdd, onClose }) {
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [sections, setSections] = useState([{ textbookId: '', chapterName: '', rangeInput: '', problems: [] }]);
+
+  const addSection = () => {
+    setSections([...sections, { textbookId: '', chapterName: '', rangeInput: '', problems: [] }]);
+  };
+
+  const updateSection = (index, field, value) => {
+    const next = [...sections];
+    next[index] = { ...next[index], [field]: value };
+    if (field === 'rangeInput') {
+      next[index].problems = parseProblems(value);
+    }
+    setSections(next);
+  };
+
+  const removeSection = (index) => {
+    if (sections.length <= 1) return;
+    setSections(sections.filter((_, i) => i !== index));
+  };
+
+  const totalProblems = sections.reduce((sum, s) => sum + s.problems.length, 0);
+
+  const handleAdd = () => {
+    if (!selectedDate) { alert('날짜를 선택하세요.'); return; }
+    if (textbooks.length === 0) { alert('먼저 반 관리에서 교재를 등록해주세요.'); return; }
+    for (let i = 0; i < sections.length; i++) {
+      const s = sections[i];
+      if (!s.textbookId) { alert(`단원 ${i+1}: 교재를 선택하세요.`); return; }
+      if (!s.chapterName.trim()) { alert(`단원 ${i+1}: 단원명을 입력하세요.`); return; }
+      if (s.problems.length === 0) { alert(`단원 ${i+1}: 문제번호를 입력하세요.`); return; }
+    }
+    const title = formatHomeworkDate(selectedDate);
+    onAdd(title, selectedDate, sections);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold mb-4">과제 등록</h3>
+
+        {/* 캘린더 */}
+        <MiniCalendar selectedDate={selectedDate} onSelect={setSelectedDate} />
+
+        {selectedDate && (
+          <div className="mt-2 mb-1 text-center">
+            <span className="bg-blue-100 text-blue-700 px-3 py-1 rounded-full text-sm font-medium">
+              {formatHomeworkDate(selectedDate)}
+            </span>
+          </div>
+        )}
+
+        {/* 단원 섹션들 */}
+        <div className="space-y-3 mt-4">
+          {sections.map((section, i) => (
+            <div key={i} className="border rounded-lg p-3 space-y-2 bg-white">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-gray-700">단원 {i + 1}</span>
+                {sections.length > 1 && (
+                  <button className="text-red-500 text-sm hover:underline" onClick={() => removeSection(i)}>삭제</button>
+                )}
+              </div>
+              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={section.textbookId} onChange={e => updateSection(i, 'textbookId', e.target.value)}>
+                <option value="">교재 선택</option>
+                {textbooks.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="단원명 (예: 1단원 지수와 로그)" value={section.chapterName} onChange={e => updateSection(i, 'chapterName', e.target.value)} />
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="문제번호 (예: 1~15, 20)" value={section.rangeInput} onChange={e => updateSection(i, 'rangeInput', e.target.value)} />
+              {section.problems.length > 0 && (
+                <div className="bg-blue-50 rounded p-2 text-xs text-blue-700">
+                  {section.problems.length}문제: {section.problems.join(', ')}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <button className="w-full mt-3 border-2 border-dashed border-gray-300 rounded-lg py-2 text-gray-500 hover:border-blue-400 hover:text-blue-500 text-sm" onClick={addSection}>
+          + 단원 추가
+        </button>
+
+        {totalProblems > 0 && (
+          <div className="mt-3 text-center text-sm text-gray-600">
+            총 <span className="font-bold text-blue-600">{totalProblems}</span>문제
+          </div>
+        )}
+
         <div className="flex gap-2 justify-end mt-4">
           <button className="px-4 py-2 rounded-lg border text-gray-600 hover:bg-gray-50" onClick={onClose}>취소</button>
           <button className="px-4 py-2 rounded-lg bg-blue-600 text-white" onClick={handleAdd}>등록</button>
@@ -414,6 +577,9 @@ function ClassManager({ classes, teacherId, onReload }) {
   const [allStudents, setAllStudents] = useState([]);
   const [addStudentId, setAddStudentId] = useState('');
   const [studentCounts, setStudentCounts] = useState({});
+  // 교재 관련
+  const [textbooks, setTextbooks] = useState([]);
+  const [showAddTextbookModal, setShowAddTextbookModal] = useState(false);
 
   const loadClassStudents = async (classId) => {
     if (!classId) { setClassStudents([]); return; }
@@ -423,7 +589,6 @@ function ClassManager({ classes, teacherId, onReload }) {
   const loadAllStudents = async () => {
     const all = await DB.getAllStudents(teacherId);
     setAllStudents(all);
-    // Count students per class
     const counts = {};
     for (const s of all) {
       counts[s.class_id] = (counts[s.class_id] || 0) + 1;
@@ -431,8 +596,18 @@ function ClassManager({ classes, teacherId, onReload }) {
     setStudentCounts(counts);
   };
 
+  const loadTextbooks = async (classId) => {
+    if (!classId) { setTextbooks([]); return; }
+    setTextbooks(await DB.getTextbooks(classId));
+  };
+
   useEffect(() => { loadAllStudents(); }, []);
-  useEffect(() => { if (selectedClass) loadClassStudents(selectedClass.id); }, [selectedClass]);
+  useEffect(() => {
+    if (selectedClass) {
+      loadClassStudents(selectedClass.id);
+      loadTextbooks(selectedClass.id);
+    }
+  }, [selectedClass]);
 
   const addClass = async (name) => {
     const { data } = await sb.from('omr_classes').insert({ name, teacher_id: teacherId }).select().single();
@@ -462,6 +637,17 @@ function ClassManager({ classes, teacherId, onReload }) {
     await sb.from('omr_students').delete().eq('id', student.id);
     loadClassStudents(selectedClass.id);
     loadAllStudents();
+  };
+
+  const addTextbook = async (name) => {
+    await sb.from('omr_textbooks').insert({ name, class_id: selectedClass.id });
+    loadTextbooks(selectedClass.id);
+  };
+
+  const deleteTextbook = async (t) => {
+    if (!confirm(`"${t.name}" 교재를 삭제하시겠습니까? 이 교재를 사용한 과제의 단원 정보도 삭제됩니다.`)) return;
+    await sb.from('omr_textbooks').delete().eq('id', t.id);
+    loadTextbooks(selectedClass.id);
   };
 
   const availableStudents = selectedClass
@@ -521,7 +707,27 @@ function ClassManager({ classes, teacherId, onReload }) {
         </div>
       )}
 
+      {/* 반교재 관리 */}
+      {selectedClass && (
+        <div className="bg-white rounded-xl shadow p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-bold">{selectedClass.name} - 반교재</h3>
+            <button className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm" onClick={() => setShowAddTextbookModal(true)}>교재 추가</button>
+          </div>
+          <div className="space-y-2">
+            {textbooks.map(t => (
+              <div key={t.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                <span className="font-medium">{t.name}</span>
+                <button className="text-red-500 hover:text-red-700 font-bold px-2" title="삭제" onClick={() => deleteTextbook(t)}>✕</button>
+              </div>
+            ))}
+            {textbooks.length === 0 && <p className="text-gray-400 text-center py-4">등록된 교재가 없습니다.</p>}
+          </div>
+        </div>
+      )}
+
       {showAddModal && <AddClassModal onAdd={addClass} onClose={() => setShowAddModal(false)} />}
+      {showAddTextbookModal && <AddTextbookModal onAdd={addTextbook} onClose={() => setShowAddTextbookModal(false)} />}
     </div>
   );
 }
@@ -614,7 +820,6 @@ function StudentManager({ classes, teacherId, onReloadClasses }) {
         <button className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm" onClick={() => setShowAddModal(true)}>학생 추가</button>
       </div>
 
-      {/* 검색/필터 */}
       <div className="flex flex-col sm:flex-row gap-2 mb-4">
         <input className="flex-1 border rounded-lg px-3 py-2 text-sm min-w-0" placeholder="이름 검색" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
         <select className="border rounded-lg px-3 py-2 text-sm w-full sm:w-auto" value={filterClassId} onChange={e => setFilterClassId(e.target.value)}>
@@ -654,8 +859,8 @@ function StudentManager({ classes, teacherId, onReloadClasses }) {
 function HomeworkManager({ classes, teacherId }) {
   const [selectedClass, setSelectedClass] = useState(null);
   const [homeworks, setHomeworks] = useState([]);
+  const [textbooks, setTextbooks] = useState([]);
   const [showAddHwModal, setShowAddHwModal] = useState(false);
-  // 제출현황 관련
   const [expandedHw, setExpandedHw] = useState(null);
   const [submissions, setSubmissions] = useState([]);
   const [students, setStudents] = useState([]);
@@ -663,11 +868,27 @@ function HomeworkManager({ classes, teacherId }) {
 
   const loadHomeworks = async () => {
     if (!selectedClass) { setHomeworks([]); return; }
-    const [hw, st] = await Promise.all([DB.getHomeworks(selectedClass.id), DB.getStudents(selectedClass.id)]);
+    const [hw, st] = await Promise.all([
+      DB.getHomeworksWithSections(selectedClass.id),
+      DB.getStudents(selectedClass.id),
+    ]);
     setHomeworks(hw);
     setStudents(st);
   };
-  useEffect(() => { if (selectedClass) { loadHomeworks(); setExpandedHw(null); setDetailStudent(null); } }, [selectedClass]);
+
+  const loadTextbooks = async () => {
+    if (!selectedClass) { setTextbooks([]); return; }
+    setTextbooks(await DB.getTextbooks(selectedClass.id));
+  };
+
+  useEffect(() => {
+    if (selectedClass) {
+      loadHomeworks();
+      loadTextbooks();
+      setExpandedHw(null);
+      setDetailStudent(null);
+    }
+  }, [selectedClass]);
 
   const loadSubmissions = async (hwId) => {
     setSubmissions(await DB.getSubmissions(hwId));
@@ -679,9 +900,25 @@ function HomeworkManager({ classes, teacherId }) {
     loadSubmissions(hw.id);
   };
 
-  const createHomework = async (title, problems) => {
+  const createHomework = async (title, homeworkDate, sections) => {
     if (!selectedClass) return;
-    await sb.from('omr_homeworks').insert({ title, class_id: selectedClass.id, problems });
+    const { data: hw } = await sb.from('omr_homeworks').insert({
+      title,
+      class_id: selectedClass.id,
+      problems: [],
+      homework_date: homeworkDate.toISOString().split('T')[0],
+    }).select().single();
+
+    if (hw) {
+      const sectionInserts = sections.map((s, i) => ({
+        homework_id: hw.id,
+        textbook_id: s.textbookId,
+        chapter_name: s.chapterName.trim(),
+        problems: s.problems,
+        sort_order: i,
+      }));
+      await sb.from('omr_homework_sections').insert(sectionInserts);
+    }
     loadHomeworks();
   };
 
@@ -693,25 +930,50 @@ function HomeworkManager({ classes, teacherId }) {
     loadHomeworks();
   };
 
-  // 제출현황 계산
   const submittedIds = new Set(submissions.map(s => s.student_id));
   const submittedStudents = students.filter(s => submittedIds.has(s.id));
   const unsubmittedStudents = students.filter(s => !submittedIds.has(s.id));
 
-  const errorRates = useMemo(() => {
+  const getStudentSubmission = (studentId) => submissions.find(s => s.student_id === studentId);
+
+  // 섹션 기반 오답률
+  const errorRatesBySection = useMemo(() => {
     if (!expandedHw || submissions.length === 0) return {};
-    const rates = {};
-    for (const p of expandedHw.problems) {
-      let wrong = 0, total = 0;
-      for (const sub of submissions) {
-        if (sub.results && sub.results[String(p)] !== undefined) {
-          total++;
-          if (sub.results[String(p)] === 'X') wrong++;
+    const sections = expandedHw.sections || [];
+    const hasSections = sections.length > 0;
+
+    if (hasSections) {
+      const rates = {};
+      for (const section of sections) {
+        rates[section.id] = {};
+        for (const p of section.problems) {
+          let wrong = 0, total = 0;
+          for (const sub of submissions) {
+            const sectionResults = sub.results?.[section.id];
+            if (sectionResults && sectionResults[String(p)] !== undefined) {
+              total++;
+              if (sectionResults[String(p)] === 'X') wrong++;
+            }
+          }
+          rates[section.id][p] = total > 0 ? Math.round((wrong / total) * 100) : null;
         }
       }
-      rates[p] = total > 0 ? Math.round((wrong / total) * 100) : null;
+      return rates;
+    } else {
+      // 레거시: flat problems
+      const rates = { _legacy: {} };
+      for (const p of (expandedHw.problems || [])) {
+        let wrong = 0, total = 0;
+        for (const sub of submissions) {
+          if (sub.results && sub.results[String(p)] !== undefined) {
+            total++;
+            if (sub.results[String(p)] === 'X') wrong++;
+          }
+        }
+        rates._legacy[p] = total > 0 ? Math.round((wrong / total) * 100) : null;
+      }
+      return rates;
     }
-    return rates;
   }, [expandedHw, submissions]);
 
   const getColor = (rate) => {
@@ -723,7 +985,10 @@ function HomeworkManager({ classes, teacherId }) {
     return 'bg-red-100';
   };
 
-  const getStudentSubmission = (studentId) => submissions.find(s => s.student_id === studentId);
+  const getTextbookName = (textbookId) => {
+    const found = textbooks.find(t => t.id === textbookId);
+    return found?.name || '';
+  };
 
   // 반 리스트 화면
   if (!selectedClass) {
@@ -757,15 +1022,27 @@ function HomeworkManager({ classes, teacherId }) {
 
         {/* 과제 목록 */}
         <div className="space-y-2">
-          {homeworks.map(h => (
-            <div key={h.id} className="flex items-center justify-between rounded-lg p-3 cursor-pointer border-2 border-gray-200 bg-gray-50 hover:border-gray-300" onClick={() => toggleExpand(h)}>
-              <div>
-                <span className="font-medium">{h.title}</span>
-                <span className="text-gray-500 text-sm ml-2">({h.problems.length}문제)</span>
+          {homeworks.map(h => {
+            const totalP = getTotalProblems(h);
+            const sectionSummary = (h.sections || []).map(s => {
+              const tbName = s.omr_textbooks?.name || getTextbookName(s.textbook_id);
+              return `${tbName} - ${s.chapter_name}`;
+            }).join(', ');
+            return (
+              <div key={h.id} className="rounded-lg p-3 cursor-pointer border-2 border-gray-200 bg-gray-50 hover:border-gray-300" onClick={() => toggleExpand(h)}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="font-medium">{h.title}</span>
+                    <span className="text-gray-500 text-sm ml-2">({totalP}문제)</span>
+                  </div>
+                  <button className="text-red-500 hover:text-red-700 font-bold px-2" onClick={e => deleteHomework(h, e)}>✕</button>
+                </div>
+                {sectionSummary && (
+                  <div className="text-xs text-gray-400 mt-1 truncate">{sectionSummary}</div>
+                )}
               </div>
-              <button className="text-red-500 hover:text-red-700 font-bold px-2" onClick={e => deleteHomework(h, e)}>✕</button>
-            </div>
-          ))}
+            );
+          })}
           {homeworks.length === 0 && <p className="text-gray-400 text-center py-4">등록된 과제가 없습니다.</p>}
         </div>
       </div>
@@ -815,68 +1092,119 @@ function HomeworkManager({ classes, teacherId }) {
               </div>
 
               {/* 학생 상세 결과 */}
-              {detailStudent && getStudentSubmission(detailStudent.id) && (
-                <div className="bg-gray-50 border rounded-lg p-4">
-                  <h4 className="font-bold mb-3">{detailStudent.name} 상세 결과</h4>
-                  <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
-                    {expandedHw.problems.map(p => {
-                      const result = getStudentSubmission(detailStudent.id)?.results?.[String(p)];
-                      return (
-                        <div key={p} className={`text-center rounded-lg p-2 ${result === 'O' ? 'bg-blue-100' : result === 'X' ? 'bg-red-100' : 'bg-gray-100'}`}>
-                          <div className="text-xs text-gray-500">{p}번</div>
-                          <div className={`font-bold ${result === 'O' ? 'text-blue-600' : 'text-red-600'}`}>{result || '-'}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+              {detailStudent && getStudentSubmission(detailStudent.id) && (() => {
+                const sub = getStudentSubmission(detailStudent.id);
+                const sections = expandedHw.sections || [];
+                const hasSections = sections.length > 0;
 
-              {/* 문항별 오답률 */}
-              {submissions.length > 0 && (
-                <div className="bg-gray-50 border rounded-lg p-4">
-                  <h4 className="font-bold mb-3">문항별 오답률</h4>
-                  <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
-                    {expandedHw.problems.map(p => (
-                      <div key={p} className={`text-center rounded-lg p-2 ${getColor(errorRates[p])}`}>
-                        <div className="text-xs text-gray-600">{p}번</div>
-                        <div className="font-bold text-sm">{errorRates[p] !== null ? errorRates[p] + '%' : '-'}</div>
-                      </div>
-                    ))}
-                  </div>
-                  {/* 구간별 요약 */}
-                  {(() => {
-                    const bands = [
-                      { label: '0%', color: 'text-blue-500', test: r => r === 0 },
-                      { label: '1~25%', color: 'text-green-500', test: r => r >= 1 && r <= 25 },
-                      { label: '26~50%', color: 'text-yellow-500', test: r => r >= 26 && r <= 50 },
-                      { label: '51~75%', color: 'text-orange-500', test: r => r >= 51 && r <= 75 },
-                      { label: '76~100%', color: 'text-red-500', test: r => r >= 76 },
-                    ];
-                    return (
-                      <div className="mt-3 space-y-1 text-sm">
-                        {bands.map(band => {
-                          const nums = expandedHw.problems.filter(p => errorRates[p] !== null && band.test(errorRates[p]));
-                          if (nums.length === 0) return null;
+                return (
+                  <div className="bg-gray-50 border rounded-lg p-4">
+                    <h4 className="font-bold mb-3">{detailStudent.name} 상세 결과</h4>
+                    {hasSections ? (
+                      sections.map(section => {
+                        const tbName = section.omr_textbooks?.name || getTextbookName(section.textbook_id);
+                        return (
+                          <div key={section.id} className="mb-4">
+                            <div className="text-sm font-medium text-blue-700 mb-2">{tbName} - {section.chapter_name}</div>
+                            <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
+                              {section.problems.map(p => {
+                                const result = sub.results?.[section.id]?.[String(p)];
+                                return (
+                                  <div key={p} className={`text-center rounded-lg p-2 ${result === 'O' ? 'bg-blue-100' : result === 'X' ? 'bg-red-100' : 'bg-gray-100'}`}>
+                                    <div className="text-xs text-gray-500">{p}번</div>
+                                    <div className={`font-bold ${result === 'O' ? 'text-blue-600' : 'text-red-600'}`}>{result || '-'}</div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
+                        {(expandedHw.problems || []).map(p => {
+                          const result = sub.results?.[String(p)];
                           return (
-                            <div key={band.label}>
-                              <span className={`font-bold ${band.color}`}>●</span>
-                              <span className={`font-semibold ${band.color} ml-1`}>{band.label}</span>
-                              <span className="text-gray-600"> ({nums.length}개): {nums.map(n => n + '번').join(', ')}</span>
+                            <div key={p} className={`text-center rounded-lg p-2 ${result === 'O' ? 'bg-blue-100' : result === 'X' ? 'bg-red-100' : 'bg-gray-100'}`}>
+                              <div className="text-xs text-gray-500">{p}번</div>
+                              <div className={`font-bold ${result === 'O' ? 'text-blue-600' : 'text-red-600'}`}>{result || '-'}</div>
                             </div>
                           );
                         })}
                       </div>
-                    );
-                  })()}
-                </div>
-              )}
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* 문항별 오답률 */}
+              {submissions.length > 0 && (() => {
+                const sections = expandedHw.sections || [];
+                const hasSections = sections.length > 0;
+
+                const renderErrorGrid = (problems, rates) => (
+                  <>
+                    <div className="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2">
+                      {problems.map(p => (
+                        <div key={p} className={`text-center rounded-lg p-2 ${getColor(rates[p])}`}>
+                          <div className="text-xs text-gray-600">{p}번</div>
+                          <div className="font-bold text-sm">{rates[p] !== null ? rates[p] + '%' : '-'}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {(() => {
+                      const bands = [
+                        { label: '0%', color: 'text-blue-500', test: r => r === 0 },
+                        { label: '1~25%', color: 'text-green-500', test: r => r >= 1 && r <= 25 },
+                        { label: '26~50%', color: 'text-yellow-500', test: r => r >= 26 && r <= 50 },
+                        { label: '51~75%', color: 'text-orange-500', test: r => r >= 51 && r <= 75 },
+                        { label: '76~100%', color: 'text-red-500', test: r => r >= 76 },
+                      ];
+                      return (
+                        <div className="mt-3 space-y-1 text-sm">
+                          {bands.map(band => {
+                            const nums = problems.filter(p => rates[p] !== null && band.test(rates[p]));
+                            if (nums.length === 0) return null;
+                            return (
+                              <div key={band.label}>
+                                <span className={`font-bold ${band.color}`}>●</span>
+                                <span className={`font-semibold ${band.color} ml-1`}>{band.label}</span>
+                                <span className="text-gray-600"> ({nums.length}개): {nums.map(n => n + '번').join(', ')}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+                  </>
+                );
+
+                return (
+                  <div className="bg-gray-50 border rounded-lg p-4">
+                    <h4 className="font-bold mb-3">문항별 오답률</h4>
+                    {hasSections ? (
+                      sections.map(section => {
+                        const tbName = section.omr_textbooks?.name || getTextbookName(section.textbook_id);
+                        const rates = errorRatesBySection[section.id] || {};
+                        return (
+                          <div key={section.id} className="mb-4">
+                            <div className="text-sm font-medium text-blue-700 mb-2">{tbName} - {section.chapter_name}</div>
+                            {renderErrorGrid(section.problems, rates)}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      renderErrorGrid(expandedHw.problems || [], errorRatesBySection._legacy || {})
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>
       )}
 
-      {showAddHwModal && <AddHomeworkModal onAdd={createHomework} onClose={() => setShowAddHwModal(false)} />}
+      {showAddHwModal && <AddHomeworkModal textbooks={textbooks} onAdd={createHomework} onClose={() => setShowAddHwModal(false)} />}
     </div>
   );
 }
@@ -890,7 +1218,7 @@ function StudentView({ user, onLogout, onUserUpdate }) {
 
   const load = async () => {
     const [hw, subs] = await Promise.all([
-      DB.getHomeworks(user.class_id),
+      DB.getHomeworksWithSections(user.class_id),
       DB.getStudentSubmissions(user.id),
     ]);
     setHomeworks(hw);
@@ -914,13 +1242,23 @@ function StudentView({ user, onLogout, onUserUpdate }) {
             {homeworks.map(h => {
               const submitted = submittedHwIds.has(h.id);
               const sub = mySubmissions.find(s => s.homework_id === h.id);
+              const totalP = getTotalProblems(h);
+              const sectionInfo = (h.sections || []).map(s => {
+                const tbName = s.omr_textbooks?.name || '';
+                return `${tbName} - ${s.chapter_name}`;
+              });
               return (
                 <button key={h.id} className="w-full text-left bg-gray-50 hover:bg-gray-100 rounded-lg p-4 flex items-center justify-between" onClick={() => setSelectedHw(h)}>
-                  <div>
-                    <span className="font-medium">{h.title}</span>
-                    <span className="text-gray-500 text-sm ml-2">({h.problems.length}문제)</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium">{h.title}</span>
+                      <span className="text-gray-500 text-sm">({totalP}문제)</span>
+                    </div>
+                    {sectionInfo.length > 0 && (
+                      <div className="text-xs text-gray-400 mt-1 truncate">{sectionInfo.join(' / ')}</div>
+                    )}
                   </div>
-                  <div>
+                  <div className="flex-shrink-0 ml-2">
                     {submitted ? (
                       <span className="bg-green-100 text-green-700 text-sm px-3 py-1 rounded-full">{sub.correct_count}O / {sub.wrong_count}X 제출완료</span>
                     ) : (
@@ -938,26 +1276,57 @@ function StudentView({ user, onLogout, onUserUpdate }) {
   );
 }
 
-// ── O/X 입력 (오답만 클릭) ──
+// ── O/X 입력 (단원별 구분) ──
 function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
-  const [marked, setMarked] = useState(new Set()); // Set of problem numbers marked as wrong
+  const [markedBySection, setMarkedBySection] = useState({});
+  // 레거시용
+  const [markedLegacy, setMarkedLegacy] = useState(new Set());
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
+  const sections = homework.sections || [];
+  const hasSections = sections.length > 0;
+
   useEffect(() => {
     if (existingSubmission?.results) {
-      // Reconstruct marked set from existing results
-      const wrongSet = new Set();
-      for (const [key, val] of Object.entries(existingSubmission.results)) {
-        if (val === 'X') wrongSet.add(parseInt(key));
+      if (hasSections) {
+        const newMarked = {};
+        for (const section of sections) {
+          const sectionResults = existingSubmission.results[section.id];
+          if (sectionResults) {
+            const wrongSet = new Set();
+            for (const [key, val] of Object.entries(sectionResults)) {
+              if (val === 'X') wrongSet.add(parseInt(key));
+            }
+            newMarked[section.id] = wrongSet;
+          }
+        }
+        setMarkedBySection(newMarked);
+      } else {
+        const wrongSet = new Set();
+        for (const [key, val] of Object.entries(existingSubmission.results)) {
+          if (val === 'X') wrongSet.add(parseInt(key));
+        }
+        setMarkedLegacy(wrongSet);
       }
-      setMarked(wrongSet);
       setSubmitted(true);
     }
   }, [existingSubmission]);
 
-  const toggle = (num) => {
-    setMarked(prev => {
+  const toggleSection = (sectionId, num) => {
+    setMarkedBySection(prev => {
+      const next = { ...prev };
+      const set = new Set(next[sectionId] || []);
+      if (set.has(num)) set.delete(num);
+      else set.add(num);
+      next[sectionId] = set;
+      return next;
+    });
+    setSubmitted(false);
+  };
+
+  const toggleLegacy = (num) => {
+    setMarkedLegacy(prev => {
       const next = new Set(prev);
       if (next.has(num)) next.delete(num);
       else next.add(num);
@@ -966,22 +1335,44 @@ function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
     setSubmitted(false);
   };
 
-  const wrongCount = marked.size;
-  const correctCount = homework.problems.length - wrongCount;
+  // 총계 계산
+  let totalProblems = 0;
+  let totalWrong = 0;
+  if (hasSections) {
+    for (const section of sections) {
+      totalProblems += section.problems.length;
+      totalWrong += (markedBySection[section.id]?.size || 0);
+    }
+  } else {
+    totalProblems = (homework.problems || []).length;
+    totalWrong = markedLegacy.size;
+  }
+  const totalCorrect = totalProblems - totalWrong;
 
   const handleSubmit = async () => {
     setSubmitting(true);
-    // Build results: unmarked = O, marked = X
-    const results = {};
-    for (const p of homework.problems) {
-      results[String(p)] = marked.has(p) ? 'X' : 'O';
+    let results = {};
+
+    if (hasSections) {
+      for (const section of sections) {
+        const sectionResult = {};
+        for (const p of section.problems) {
+          sectionResult[String(p)] = (markedBySection[section.id]?.has(p)) ? 'X' : 'O';
+        }
+        results[section.id] = sectionResult;
+      }
+    } else {
+      for (const p of (homework.problems || [])) {
+        results[String(p)] = markedLegacy.has(p) ? 'X' : 'O';
+      }
     }
+
     const payload = {
       student_id: studentId,
       homework_id: homework.id,
       results,
-      correct_count: correctCount,
-      wrong_count: wrongCount,
+      correct_count: totalCorrect,
+      wrong_count: totalWrong,
       submitted_at: new Date().toISOString(),
     };
     if (existingSubmission) {
@@ -993,12 +1384,28 @@ function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
     setSubmitted(true);
   };
 
+  const renderProblemGrid = (problems, isWrongFn, onToggle) => (
+    <div className="grid grid-cols-5 sm:grid-cols-6 md:grid-cols-8 gap-2">
+      {problems.map(p => {
+        const isWrong = isWrongFn(p);
+        return (
+          <button key={p} className={`ox-btn rounded-lg p-3 text-center border-2 ${isWrong ? 'border-red-500 bg-red-50' : 'border-gray-200 bg-white hover:border-gray-300'}`} onClick={() => onToggle(p)}>
+            <div className="text-xs text-gray-500 mb-1">{p}번</div>
+            <div className={`text-xl font-bold ${isWrong ? 'text-red-600' : 'text-gray-300'}`}>
+              {isWrong ? 'X' : '-'}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="bg-white rounded-xl shadow p-6">
       <div className="flex items-center justify-between mb-4">
         <button className="text-blue-600 hover:underline" onClick={onBack}>&larr; 목록으로</button>
         <h2 className="font-bold text-lg">{homework.title}</h2>
-        <div className="text-sm text-gray-500">{homework.problems.length}문제</div>
+        <div className="text-sm text-gray-500">{totalProblems}문제</div>
       </div>
 
       <div className="bg-gray-50 rounded-lg p-3 mb-4 text-center text-sm text-gray-600">
@@ -1007,28 +1414,46 @@ function OXSubmission({ homework, studentId, onBack, existingSubmission }) {
 
       {submitted && (
         <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4 text-center">
-          <p className="text-green-800 font-medium">제출 완료! {correctCount}O / {wrongCount}X</p>
+          <p className="text-green-800 font-medium">제출 완료! {totalCorrect}O / {totalWrong}X</p>
           <p className="text-green-600 text-sm mt-1">아래에서 수정 후 다시 제출할 수 있습니다.</p>
         </div>
       )}
 
-      <div className="grid grid-cols-5 sm:grid-cols-6 md:grid-cols-8 gap-2 mb-6">
-        {homework.problems.map(p => {
-          const isWrong = marked.has(p);
-          return (
-            <button key={p} className={`ox-btn rounded-lg p-3 text-center border-2 ${isWrong ? 'border-red-500 bg-red-50' : 'border-gray-200 bg-white hover:border-gray-300'}`} onClick={() => toggle(p)}>
-              <div className="text-xs text-gray-500 mb-1">{p}번</div>
-              <div className={`text-xl font-bold ${isWrong ? 'text-red-600' : 'text-gray-300'}`}>
-                {isWrong ? 'X' : '-'}
+      {hasSections ? (
+        <div className="space-y-6 mb-6">
+          {sections.map(section => {
+            const tbName = section.omr_textbooks?.name || '';
+            const sectionWrong = markedBySection[section.id]?.size || 0;
+            const sectionCorrect = section.problems.length - sectionWrong;
+            return (
+              <div key={section.id}>
+                <div className="bg-blue-50 rounded-lg p-3 mb-3">
+                  <div className="font-medium text-blue-800">{tbName}</div>
+                  <div className="text-sm text-blue-600">{section.chapter_name}</div>
+                  <div className="text-xs text-blue-400 mt-1">{section.problems.length}문제 ({sectionCorrect}O / {sectionWrong}X)</div>
+                </div>
+                {renderProblemGrid(
+                  section.problems,
+                  (p) => markedBySection[section.id]?.has(p),
+                  (p) => toggleSection(section.id, p)
+                )}
               </div>
-            </button>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="mb-6">
+          {renderProblemGrid(
+            homework.problems || [],
+            (p) => markedLegacy.has(p),
+            toggleLegacy
+          )}
+        </div>
+      )}
 
       <div className="flex items-center justify-between">
         <div className="text-sm text-gray-600">
-          <span className="text-blue-600 font-medium">{correctCount}O</span> / <span className="text-red-600 font-medium">{wrongCount}X</span>
+          <span className="text-blue-600 font-medium">{totalCorrect}O</span> / <span className="text-red-600 font-medium">{totalWrong}X</span>
         </div>
         <button className="px-6 py-3 rounded-lg font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50" onClick={handleSubmit} disabled={submitting}>
           {submitting ? '제출 중...' : submitted ? '다시 제출' : '제출'}

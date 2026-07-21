@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS omr_homeworks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title TEXT NOT NULL,
   class_id UUID NOT NULL REFERENCES omr_classes(id) ON DELETE CASCADE,
-  problems INT[] NOT NULL,
+  problems INT[] NOT NULL DEFAULT '{}',
+  homework_date DATE,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -51,9 +52,33 @@ CREATE TABLE IF NOT EXISTS omr_submissions (
   UNIQUE(student_id, homework_id)
 );
 
+-- 6. Textbooks (반교재)
+CREATE TABLE IF NOT EXISTS omr_textbooks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  class_id UUID NOT NULL REFERENCES omr_classes(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 7. Homework Sections (과제 단원별 문제)
+CREATE TABLE IF NOT EXISTS omr_homework_sections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  homework_id UUID NOT NULL REFERENCES omr_homeworks(id) ON DELETE CASCADE,
+  textbook_id UUID NOT NULL REFERENCES omr_textbooks(id) ON DELETE CASCADE,
+  chapter_name TEXT NOT NULL,
+  problems INT[] NOT NULL,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Add homework_date to existing omr_homeworks (safe if column already exists)
+-- ALTER TABLE omr_homeworks ADD COLUMN IF NOT EXISTS homework_date DATE;
+
 -- Disable RLS for now (using anon key)
 ALTER TABLE omr_teachers DISABLE ROW LEVEL SECURITY;
 ALTER TABLE omr_classes DISABLE ROW LEVEL SECURITY;
 ALTER TABLE omr_students DISABLE ROW LEVEL SECURITY;
 ALTER TABLE omr_homeworks DISABLE ROW LEVEL SECURITY;
 ALTER TABLE omr_submissions DISABLE ROW LEVEL SECURITY;
+ALTER TABLE omr_textbooks DISABLE ROW LEVEL SECURITY;
+ALTER TABLE omr_homework_sections DISABLE ROW LEVEL SECURITY;
