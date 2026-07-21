@@ -470,42 +470,76 @@ function MiniCalendar({ selectedDate, onSelect }) {
   );
 }
 
-// ── 과제 등록 모달 (캘린더 + 교재 + 단원) ──
+// ── 과제 등록 모달 (캘린더 + 교재카드 + 단원) ──
 function AddHomeworkModal({ textbooks, onAdd, onClose }) {
   const [selectedDate, setSelectedDate] = useState(null);
-  const [sections, setSections] = useState([{ textbookId: '', chapterName: '', rangeInput: '', problems: [] }]);
+  // 교재별 카드 구조: [{ textbookId, chapters: [{ chapterName, rangeInput, problems }] }]
+  const [cards, setCards] = useState([]);
 
-  const addSection = () => {
-    setSections([...sections, { textbookId: '', chapterName: '', rangeInput: '', problems: [] }]);
+  const addCard = () => {
+    setCards([...cards, { textbookId: '', chapters: [{ chapterName: '', rangeInput: '', problems: [] }] }]);
   };
 
-  const updateSection = (index, field, value) => {
-    const next = [...sections];
-    next[index] = { ...next[index], [field]: value };
-    if (field === 'rangeInput') {
-      next[index].problems = parseProblems(value);
+  const removeCard = (ci) => {
+    setCards(cards.filter((_, i) => i !== ci));
+  };
+
+  const updateCardTextbook = (ci, value) => {
+    const next = [...cards];
+    next[ci] = { ...next[ci], textbookId: value };
+    setCards(next);
+  };
+
+  const addChapter = (ci) => {
+    const next = [...cards];
+    next[ci] = { ...next[ci], chapters: [...next[ci].chapters, { chapterName: '', rangeInput: '', problems: [] }] };
+    setCards(next);
+  };
+
+  const removeChapter = (ci, chi) => {
+    const next = [...cards];
+    next[ci] = { ...next[ci], chapters: next[ci].chapters.filter((_, i) => i !== chi) };
+    if (next[ci].chapters.length === 0) {
+      setCards(next.filter((_, i) => i !== ci));
+    } else {
+      setCards(next);
     }
-    setSections(next);
   };
 
-  const removeSection = (index) => {
-    if (sections.length <= 1) return;
-    setSections(sections.filter((_, i) => i !== index));
+  const updateChapter = (ci, chi, field, value) => {
+    const next = [...cards];
+    const ch = { ...next[ci].chapters[chi], [field]: value };
+    if (field === 'rangeInput') {
+      ch.problems = parseProblems(value);
+    }
+    next[ci] = { ...next[ci], chapters: next[ci].chapters.map((c, i) => i === chi ? ch : c) };
+    setCards(next);
   };
 
-  const totalProblems = sections.reduce((sum, s) => sum + s.problems.length, 0);
+  // flat sections for onAdd (기존 구조 호환)
+  const flatSections = cards.flatMap(card =>
+    card.chapters.map(ch => ({ textbookId: card.textbookId, chapterName: ch.chapterName, problems: ch.problems }))
+  );
+
+  const totalProblems = flatSections.reduce((sum, s) => sum + s.problems.length, 0);
+
+  // 이미 선택된 교재 ID 목록 (중복 선택 방지)
+  const usedTextbookIds = new Set(cards.map(c => c.textbookId).filter(Boolean));
 
   const handleAdd = () => {
     if (!selectedDate) { alert('날짜를 선택하세요.'); return; }
-    if (textbooks.length === 0) { alert('먼저 반 관리에서 교재를 등록해주세요.'); return; }
-    for (let i = 0; i < sections.length; i++) {
-      const s = sections[i];
-      if (!s.textbookId) { alert(`단원 ${i+1}: 교재를 선택하세요.`); return; }
-      if (!s.chapterName.trim()) { alert(`단원 ${i+1}: 단원명을 입력하세요.`); return; }
-      if (s.problems.length === 0) { alert(`단원 ${i+1}: 문제번호를 입력하세요.`); return; }
+    if (cards.length === 0) { alert('교재를 추가하세요.'); return; }
+    for (let ci = 0; ci < cards.length; ci++) {
+      const card = cards[ci];
+      if (!card.textbookId) { alert(`교재 ${ci+1}: 교재를 선택하세요.`); return; }
+      for (let chi = 0; chi < card.chapters.length; chi++) {
+        const ch = card.chapters[chi];
+        if (!ch.chapterName.trim()) { alert(`교재 ${ci+1} > 단원 ${chi+1}: 단원명을 입력하세요.`); return; }
+        if (ch.problems.length === 0) { alert(`교재 ${ci+1} > 단원 ${chi+1}: 문제번호를 입력하세요.`); return; }
+      }
     }
     const title = formatHomeworkDate(selectedDate);
-    onAdd(title, selectedDate, sections);
+    onAdd(title, selectedDate, flatSections);
     onClose();
   };
 
@@ -525,33 +559,53 @@ function AddHomeworkModal({ textbooks, onAdd, onClose }) {
           </div>
         )}
 
-        {/* 단원 섹션들 */}
+        {/* 교재 카드들 */}
         <div className="space-y-3 mt-4">
-          {sections.map((section, i) => (
-            <div key={i} className="border rounded-lg p-3 space-y-2 bg-white">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-700">단원 {i + 1}</span>
-                {sections.length > 1 && (
-                  <button className="text-red-500 text-sm hover:underline" onClick={() => removeSection(i)}>삭제</button>
-                )}
-              </div>
-              <select className="w-full border rounded-lg px-3 py-2 text-sm" value={section.textbookId} onChange={e => updateSection(i, 'textbookId', e.target.value)}>
-                <option value="">교재 선택</option>
-                {textbooks.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="단원명 (예: 1단원 지수와 로그)" value={section.chapterName} onChange={e => updateSection(i, 'chapterName', e.target.value)} />
-              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="문제번호 (예: 1~15, 20)" value={section.rangeInput} onChange={e => updateSection(i, 'rangeInput', e.target.value)} />
-              {section.problems.length > 0 && (
-                <div className="bg-blue-50 rounded p-2 text-xs text-blue-700">
-                  {section.problems.length}문제: {section.problems.join(', ')}
+          {cards.map((card, ci) => {
+            const tbName = textbooks.find(t => t.id === card.textbookId)?.name;
+            return (
+              <div key={ci} className="border-2 border-blue-200 rounded-xl bg-blue-50/30 overflow-hidden">
+                {/* 교재 헤더 */}
+                <div className="flex items-center justify-between bg-blue-50 px-3 py-2 border-b border-blue-200">
+                  <select className="flex-1 bg-transparent text-sm font-medium text-blue-800 outline-none cursor-pointer" value={card.textbookId} onChange={e => updateCardTextbook(ci, e.target.value)}>
+                    <option value="">교재 선택</option>
+                    {textbooks.map(t => (
+                      <option key={t.id} value={t.id} disabled={usedTextbookIds.has(t.id) && t.id !== card.textbookId}>{t.name}</option>
+                    ))}
+                  </select>
+                  <button className="text-red-400 hover:text-red-600 font-bold px-2 ml-2 text-sm" onClick={() => removeCard(ci)}>✕</button>
                 </div>
-              )}
-            </div>
-          ))}
+
+                {/* 단원들 */}
+                <div className="p-3 space-y-2">
+                  {card.chapters.map((ch, chi) => (
+                    <div key={chi} className="bg-white border border-gray-200 rounded-lg p-2.5 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-medium text-gray-500">단원 {chi + 1}</span>
+                        {card.chapters.length > 1 && (
+                          <button className="text-red-400 hover:text-red-600 text-xs" onClick={() => removeChapter(ci, chi)}>삭제</button>
+                        )}
+                      </div>
+                      <input className="w-full border rounded px-2.5 py-1.5 text-sm" placeholder="단원명 (예: 1단원 지수와 로그)" value={ch.chapterName} onChange={e => updateChapter(ci, chi, 'chapterName', e.target.value)} />
+                      <input className="w-full border rounded px-2.5 py-1.5 text-sm" placeholder="문제번호 (예: 1~15, 20)" value={ch.rangeInput} onChange={e => updateChapter(ci, chi, 'rangeInput', e.target.value)} />
+                      {ch.problems.length > 0 && (
+                        <div className="bg-blue-50 rounded p-1.5 text-xs text-blue-700">
+                          {ch.problems.length}문제: {ch.problems.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  <button className="w-full border border-dashed border-gray-300 rounded-lg py-1.5 text-gray-400 hover:border-blue-400 hover:text-blue-500 text-xs" onClick={() => addChapter(ci)}>
+                    + 단원 추가
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
-        <button className="w-full mt-3 border-2 border-dashed border-gray-300 rounded-lg py-2 text-gray-500 hover:border-blue-400 hover:text-blue-500 text-sm" onClick={addSection}>
-          + 단원 추가
+        <button className="w-full mt-3 border-2 border-dashed border-blue-300 rounded-xl py-2.5 text-blue-500 hover:border-blue-500 hover:bg-blue-50 text-sm font-medium" onClick={addCard}>
+          + 교재 추가
         </button>
 
         {totalProblems > 0 && (
